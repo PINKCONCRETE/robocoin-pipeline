@@ -4,7 +4,7 @@ from prefect import task
 TASK_REGISTRY = {}
 
 
-def register_task(name=None):
+def register_task(name=None, ncpu=1, nmem=4, ngpu=0):
     """
     自定义装饰器：将 task 自动注册到 TASK_REGISTRY，并应用 @task
     """
@@ -19,15 +19,11 @@ def register_task(name=None):
         # 将带 @task 的 callable 注册到全局字典
         if task_name in TASK_REGISTRY:
             raise ValueError(f"Task name '{task_name}' is already registered.")
-        TASK_REGISTRY[task_name] = prefect_task
+        TASK_REGISTRY[task_name] = {
+            "fn": prefect_task,
+            "resources": {"CPU": ncpu, "MEMORY_GB": nmem, "GPU": ngpu},
+        }
 
-        # # 可选：保留原始函数的一些属性（非必须）
-        # @wraps(fn)
-        # def wrapper(*args, **kwargs):
-        #     return prefect_task(*args, **kwargs)
-
-        # 注意：我们返回的是 Prefect Task 对象本身（它是可调用的）
-        # 所以通常直接返回 prefect_task 即可
         return prefect_task
 
     return decorator
