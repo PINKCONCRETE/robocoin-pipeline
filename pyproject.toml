@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robocoin-pipeline"
+version = "0.1.0"
+description = "RoboCOIN distributed task orchestration with Prefect and Dask for ad-hoc LAN clusters (multi-machine or single-machine)."
+readme = "README.md"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Distributed Computing",
+]
+requires-python = ">=3.9"
+
+dependencies = [
+    "prefect",
+    "dask[distributed]>=2023.0.0",
+    "prefect-dask>=0.3.0",
+    "lerobot",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "ruff",
+    "pytest",
+    "ipython",
+    "dask[diagnostics]", # for dashboard & performance tools
+    "pre-commit",
+]
+monitor = [
+    "prometheus-client", # if you add metrics later
+    "bokeh>=3.1.0",      # required for Dask dashboard
+]
+
+[project.scripts]
+robocoin-pipeline-scheduler = "robocoin_pipeline.cli.scheduler:main"
+robocoin-pipeline-worker = "robocoin_pipeline.cli.worker:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/robocoin-pipeline"
+Repository = "https://github.com/yourusername/robocoin-pipeline"
+Documentation = "https://github.com/yourusername/robocoin-pipeline#readme"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["robocoin-pipeline"]
+
+[tool.black]
+line-length = 88
+target-version = ['py39', 'py310', 'py311', 'py312', 'py313']
+
+[tool.ruff]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM"]
+ignore = ["E501"]                                     # handled by black
+target-version = "py39"

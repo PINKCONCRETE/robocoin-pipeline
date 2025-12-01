@@ -1,0 +1,17 @@
+// .vscode/settings.json
+{
+    // 使用 Ruff 作为 linter 和 formatter（可选，也可分开）
+    "python.linting.enabled": true,
+    "python.linting.ruffEnabled": true,
+    // 格式化工具选择
+    "python.formatting.provider": "black",
+    // 保存时自动格式化
+    "editor.formatOnSave": true,
+    // 使用 Ruff 进行代码组织（import 排序等）
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": "explicit",
+        "source.fixAll.ruff": "explicit"
+    },
+    // 确保使用项目本地的 black/ruff（而非全局）
+    "python.defaultInterpreterPath": "./venv/bin/python", // 或你的虚拟环境路径
+}
