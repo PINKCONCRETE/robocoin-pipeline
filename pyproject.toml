@@ -60,11 +60,23 @@ Documentation = "https://github.com/yourusername/robocoin-pipeline#readme"
 where = ["src"]
 include = ["robocoin-pipeline"]
 
+
 [tool.black]
 line-length = 88
-target-version = ['py39', 'py310', 'py311', 'py312', 'py313']
+target-version = ["py39", "py310", "py311", "py312"]
 
 [tool.ruff]
-select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM"]
-ignore = ["E501"]                                     # handled by black
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM", "ANN"]
+ignore = ["E501"]
 target-version = "py39"
+
+[tool.ruff.flake8-annotations]
+# 关键：设为 false 表示不忽略未注解函数 → 强制要求类型注解
+ignore-fully-untyped = false
+
+# 可选：要求 __init__ 必须写 -> None
+mypy-init-return = false
+
+# 其他可选（按需）：
+# suppress-dummy-args = false      # 是否允许省略 self/cls 类型（通常保持默认 true）
+# suppress-none-returning = false  # 是否允许省略返回 None 的函数的 -> None
