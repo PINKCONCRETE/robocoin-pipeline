@@ -1,0 +1,11 @@
+scenec_annotation:
+- annotations/scene_annotations.jsonl
+- meta/scene_annotation_info.json
+- meta/scene_annotation_episodes_stats.jsonl
+- scene_annotation_data
+
+subtask_annotation:
+- annotations/subtask_annotations.jsonl
+- meta/subtask_annotation_info.json
+- meta/subtask_annotation_episodes_stats.jsonl
+- subtask_annotation_data

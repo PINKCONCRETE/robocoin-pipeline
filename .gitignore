@@ -57,3 +57,5 @@ dask-scheduler-state.json
 .env
 config.toml
 *.log
+
+sync_files/*

@@ -1,5 +1,7 @@
 import os
 
+ROBOCOIN_PIPELINE_DISTRIBUTION_MODE = 1  # 0: 本地开发模式, 1: 集群分布式模式
+
 
 def get_dask_scheduler_address() -> str:
     """
