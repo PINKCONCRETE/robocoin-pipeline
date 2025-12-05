@@ -164,21 +164,56 @@ python test_sync.py
 }
 ```
 
-### 目录结构
+### 示例目录结构
 
 ```plaintext
-robocoin-pipeline/
-├── sync_files/                    # 本地同步目录
-│   └── [dataset_name]/           # 数据集名称目录
-│       ├── .sync_metadata.json   # UUID追踪文件
-│       ├── annotations/          # 根据feature_key配置
-│       ├── meta/
-│       └── scene_annotation_data/
-└── /mnt/nas/.../[dataset_name]/  # 云端NAS数据集
-    ├── .sync_metadata.json       # UUID追踪文件
-    ├── annotations/
-    ├── meta/
-    └── scene_annotation_data/
+.
+└── RMC-AIDA-L_box_up_down
+    ├── dataset_info.yaml
+    ├── format_convert
+    │   ├── data
+    │   │   └── chunk-000
+    │   ├── meta
+    │   │   ├── info.json
+    │   │   └── tasks.jsonl
+    │   └── videos
+    │       └── chunk-000
+    │           ├── observation.images.cam_high_rgb
+    │           ├── observation.images.cam_left_wrist_rgb
+    │           └── observation.images.cam_right_wrist_rgb
+    ├── merged
+    │   ├── data
+    │   │   └── chunk-000
+    │   ├── hardlink_mappings.json
+    │   ├── meta
+    │   │   ├── annotations
+    │   │   │   ├── eef_acc_mag_annotation.jsonl
+    │   │   │   ├── eef_direction_annotation.jsonl
+    │   │   │   ├── eef_velocity_annotation.jsonl
+    │   │   │   ├── gripper_activity_annotation.jsonl
+    │   │   │   ├── gripper_mode_annotation.jsonl
+    │   │   │   ├── scene_annotations.jsonl
+    │   │   │   └── subtask_annotations.jsonl
+    │   │   ├── info.json
+    │   │   ├── merged_info.json
+    │   │   ├── motion_annotation_info.json
+    │   │   ├── ori_info.json
+    │   │   ├── quality_checked_info.json
+    │   │   ├── quality_checked_tasks.jsonl
+    │   │   ├── scene_annotation_info.json
+    │   │   ├── state_action_info.json
+    │   │   ├── subtask_annotation_info.json
+    │   │   └── tasks.jsonl
+    │   └── videos
+    └── motion_annotation
+        ├── data
+        │   └── chunk-000
+        ├── hardlink_mappings.json
+        ├── meta
+        │   ├── info.json
+        │   └── tasks.jsonl
+        └── videos
+
 ```
 
 ### 注意事项
@@ -188,3 +223,55 @@ robocoin-pipeline/
 3. **增量添加feature**: 新增feature_key时会自动为其初始化UUID
 4. **数据安全**: 使用临时文件+原子重命名确保写入安全
 5. **跳过机制**: UUID匹配且本地有数据时自动跳过同步，节省时间
+
+### Hardlink/Symlink重建功能
+
+文件同步工具支持自动重建hard links和符号链接，这对于节省存储空间和保持数据一致性非常有用。
+
+#### 工作原理
+
+1. **Pull操作**: 拉取数据后，自动读取 `[feature_key]/hardlink_mappings.json` 文件
+2. **自动拉取缺失源文件**: 如果源文件/目录不存在，会自动从云端递归拉取
+3. **智能链接创建**:
+   - **文件**: 创建hard link（多个文件名指向同一个inode）
+   - **目录**: 创建符号链接（使用相对路径）
+4. **Push操作**: 推送时自动检测硬链接，跳过已推送的源文件，避免重复传输
+5. **容错处理**: 如果无法创建hard link，会自动降级为文件复制
+
+#### hardlink_mappings.json格式
+
+```json
+{
+  "merged/meta": "format_convert/meta",
+  "merged/data/chunk-000": "format_convert/data/chunk-000",
+  "merged/videos/observation.images.cam_high_rgb": "format_convert/videos/observation.images.cam_high_rgb"
+}
+```
+
+- **键**: 目标路径（相对于数据集根目录）
+- **值**: 源路径（相对于数据集根目录）
+- **支持类型**: 文件使用hard link，目录使用符号链接
+
+#### 使用场景
+
+当多个feature_key共享相同的数据文件或目录时，使用链接可以：
+- **节省存储空间**: 文件级hard link不占用额外空间，目录级symlink共享整个目录树
+- **保持数据一致性**: 多个路径指向同一份数据
+- **提高同步效率**: Push时自动跳过硬链接文件，避免重复上传
+- **自动化管理**: Pull时自动拉取缺失的源文件/目录
+
+#### 注意事项
+
+1. **自动拉取**: 源文件/目录缺失时，系统会自动从云端拉取，确保链接创建成功
+2. **跨文件系统**: Hard link无法跨文件系统，此时会自动降级为文件复制
+3. **JSON格式**: 确保 `hardlink_mappings.json` 是有效的JSON格式（无尾部逗号）
+4. **符号链接**: 目录使用相对路径符号链接，移动数据集时链接仍然有效
+5. **Push优化**: 系统通过inode检测硬链接，自动跳过重复推送
+
+#### 技术细节
+
+- **文件级链接**: 使用 `Path.hardlink_to()` 创建hard link，共享inode
+- **目录级链接**: 使用 `Path.symlink_to()` 创建相对路径符号链接
+- **智能检测**: 通过 `st_ino` 比对检测文件是否为硬链接
+- **递归拉取**: 使用 `pull_missing_file()` 递归拉取缺失的源文件和目录
+- **容错降级**: Hard link创建失败时自动降级为 `shutil.copy2()` 复制

@@ -6,16 +6,14 @@ from robocoin_pipeline.utils.file_sync import pull_files, push_files
 
 # 数据集路径
 DATASET_PATH = (
-    "/mnt/nas/synnas/docker2/robocoin-datasets/unitree_g1_basket_storage_peach"
+    "/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets/RMC-AIDA-L_box_up_down"
 )
-FEATURES = ["scenec_annotation", "subtask_annotation"]
+FEATURES = ["merged"]
 
 
 def test_pull() -> None:
     """测试从云端拉取数据"""
-    print("=" * 60)
-    print("测试: Pull数据从云端NAS")
-    print("=" * 60)
+    print("=" * 60 + "\n测试: Pull数据从云端NAS\n" + "=" * 60)
     pull_files(repo_path=DATASET_PATH, feature_keys=FEATURES)
 
     # 验证本地文件
@@ -29,12 +27,10 @@ def test_pull() -> None:
 
 def test_push() -> None:
     """测试推送数据到云端（使用测试目录）"""
-    print("\n" + "=" * 60)
-    print("测试: Push数据到测试目录")
-    print("=" * 60)
+    print("=" * 60 + "\n测试: Push数据到云端NAS\n" + "=" * 60)
 
     # 推送到临时测试目录避免影响真实数据
-    test_path = "/tmp/test_nas_dataset/unitree_g1_basket_storage_peach"
+    test_path = "/tmp/test_nas_dataset/RMC-AIDA-L_box_up_down"
     push_files(repo_path=test_path, feature_keys=FEATURES)
 
     print(f"\n测试目录: {test_path}")

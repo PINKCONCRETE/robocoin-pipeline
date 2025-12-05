@@ -1,11 +1,14 @@
 scenec_annotation:
-- annotations/scene_annotations.jsonl
-- meta/scene_annotation_info.json
-- meta/scene_annotation_episodes_stats.jsonl
-- scene_annotation_data
+- scene_annotation
 
 subtask_annotation:
-- annotations/subtask_annotations.jsonl
-- meta/subtask_annotation_info.json
-- meta/subtask_annotation_episodes_stats.jsonl
-- subtask_annotation_data
+- subtask_annotation
+
+motion_annotation:
+- motion_annotation
+
+merged:
+- merged
+
+format_convert:
+- format_convert
