@@ -1,10 +1,24 @@
+from logging import Logger, getLogger
 from pathlib import Path
 
 
-def sync_files(
+def sync_in(
     repo_path: str | Path,
-    need_ori_data: bool = False,
-    input_features: list[str] = None,
-    output_features: list[str] = None,
-):
+    in_fields: set[str] = None,
+    logger: Logger | None = None,
+) -> None:
+    if logger is None:
+        logger = getLogger(__name__)
+    logger.info(f"Syncing in fields: {in_fields} of {repo_path}")
+    pass
+
+
+def sync_out(
+    repo_path: str | Path,
+    out_field: str,
+    logger: Logger | None = None,
+) -> None:
+    if logger is None:
+        logger = getLogger(__name__)
+    logger.info(f"Syncing out field: {out_field} to {repo_path}")
     pass
