@@ -1,433 +1,873 @@
 """
-src.robocoin_pipeline.utils.file_sync
-
-文件同步工具：支持在云端NAS和本地sync_files之间双向同步数据
-使用UUID追踪机制确保数据一致性和增量更新
+用于文件同步的实用程序模块。
+包含内存管理，文件传输和路径处理功能。
 """
 
+import hashlib
 import json
+import logging
 import os
 import shutil
-import uuid
-from collections.abc import Generator
-from contextlib import contextmanager
-from datetime import datetime
+import tarfile
 from pathlib import Path
-from typing import Literal
+from typing import Optional, dict, list, set
 
-import yaml
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
-from robocoin_pipeline.config import ROBOCOIN_PIPELINE_DISTRIBUTION_MODE
-
-# Constants
-METADATA_FILE = ".sync_metadata.json"
-HARDLINK_MAPPINGS_FILE = "hardlink_mappings.json"
-FEATURE_CONFIG_FILE = "feature_key.yaml"
-SYNC_BASE_DIR = Path(__file__).parent.parent.parent.parent / "sync_files"
-
-
-@contextmanager
-def safe_write(file_path: Path) -> Generator[Path, None, None]:
-    """安全写入文件的上下文管理器，先写临时文件再重命名"""
-    temp_path = file_path.with_suffix(f"{file_path.suffix}.tmp")
-    try:
-        yield temp_path
-        temp_path.replace(file_path)
-    except Exception:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise
+# 常量配置
+TAR_SIZE_THRESHOLD = 50 * 1024 * 1024  # 50MB
+BUFFER_SIZE_ENV = "ROBOCOIN_BUFFER_SIZE"  # 环境变量：缓存大小（字节）
+AUTO_CLEANUP_ENV = "ROBOCOIN_AUTO_CLEANUP"  # 环境变量：是否自动清理
+HASH_FILE_NAME = "file_hash.json"
+TAR_FILE_NAME = "file_tar.json"
+HARDLINK_MAPPING_NAME = "hardlink_mappings.json"
+UPDATE_TIME_NAME = "update_time.json"
 
 
-def load_metadata(metadata_path: Path) -> dict[str, dict]:
-    """加载或初始化metadata文件"""
-    if not metadata_path.exists():
-        return {}
+class FileSyncError(Exception):
+    """文件同步相关的异常"""
 
-    with open(metadata_path, encoding="utf-8") as f:
-        return json.load(f)
+    pass
 
 
-def save_metadata(metadata_path: Path, metadata: dict[str, dict]) -> None:
-    """安全保存metadata文件"""
-    with (
-        safe_write(metadata_path) as temp_path,
-        open(temp_path, "w", encoding="utf-8") as f,
-    ):
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+class InsufficientSpaceError(FileSyncError):
+    """存储空间不足异常"""
+
+    pass
 
 
-def ensure_feature_uuid(metadata: dict[str, dict], feature_key: str) -> str:
-    """确保feature_key有UUID，如果没有则创建"""
-    if feature_key not in metadata:
-        metadata[feature_key] = {
-            "uuid": str(uuid.uuid4()),
-            "created_at": datetime.now().isoformat(),
-        }
-    return metadata[feature_key]["uuid"]
+# ============================================================================
+# 工具函数
+# ============================================================================
 
 
-def get_dataset_name(repo_path: Path) -> str:
-    """从repo路径提取dataset名称"""
-    return repo_path.name
-
-
-def load_feature_config() -> dict[str, list[str]]:
-    """加载feature_key配置"""
-    config_path = Path(__file__).parent / FEATURE_CONFIG_FILE
-    with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def initialize_metadata(
-    metadata: dict[str, dict], feature_config: dict[str, list[str]]
-) -> None:
-    """为所有feature_key初始化UUID"""
-    for feature_key in feature_config:
-        ensure_feature_uuid(metadata, feature_key)
-
-
-def load_hardlink_mappings(base_dir: Path, feature_key: str) -> dict[str, str] | None:
-    """加载hardlink映射文件
-
-    :param base_dir: 数据集基础目录
-    :param feature_key: feature_key名称
-    :return: hardlink映射字典，如果文件不存在则返回None
+def calculate_file_hash(file_path: Path, algorithm: str = "md5") -> str:
     """
-    mapping_file = base_dir / feature_key / HARDLINK_MAPPINGS_FILE
-    if not mapping_file.exists():
-        return None
+    计算文件的哈希值。
 
-    with open(mapping_file, encoding="utf-8") as f:
-        return json.load(f)
+    Args:
+        file_path: 文件路径
+        algorithm: 哈希算法（默认 md5）
 
-
-def is_hardlink(file_path: Path, reference_path: Path) -> bool:
-    """检查两个文件是否为硬链接（指向同一个inode）
-
-    :param file_path: 要检查的文件路径
-    :param reference_path: 参考文件路径
-    :return: 如果是硬链接返回True
+    Returns:
+        文件的哈希值（十六进制字符串）
     """
-    try:
-        if not (file_path.exists() and reference_path.exists()):
-            return False
-        if file_path.is_dir() or reference_path.is_dir():
-            return False
-        return file_path.stat().st_ino == reference_path.stat().st_ino
-    except OSError:
-        return False
-
-
-def pull_missing_file(repo_path: Path, sync_dir: Path, file_path: str) -> bool:
-    """从云端NAS递归拉取缺失的文件
-
-    :param repo_path: 云端NAS数据集路径
-    :param sync_dir: 本地sync目录
-    :param file_path: 相对文件路径
-    :return: 成功返回True
-    """
-    src = repo_path / file_path
-    if not src.exists():
-        print(f"    错误: 云端也不存在: {file_path}")
-        return False
-
-    dst = sync_dir / file_path
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    hash_func = hashlib.new(algorithm)
 
     try:
-        if src.is_dir():
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst)
-            print(f"    拉取目录: {file_path}")
-        else:
-            shutil.copy2(src, dst)
-            print(f"    拉取文件: {file_path}")
-        return True
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                hash_func.update(chunk)
+        return hash_func.hexdigest()
     except Exception as e:
-        print(f"    拉取失败: {e}")
-        return False
+        logger.error(f"计算文件哈希失败 {file_path}: {e}")
+        raise FileSyncError(f"计算文件哈希失败: {e}") from e
 
 
-def _create_directory_symlink(
-    target: Path, source: Path, target_path: str, source_path: str
-) -> None:
-    """创建目录符号链接（使用相对路径）"""
-    try:
-        relative_source = os.path.relpath(source, target.parent)
-        target.symlink_to(relative_source)
-        print(f"    ✓ 目录符号链接: {target_path} -> {source_path}")
-    except OSError as e:
-        print(f"    警告: 无法创建符号链接: {e}")
-
-
-def _create_file_hardlink(
-    target: Path, source: Path, target_path: str, source_path: str
-) -> None:
-    """创建文件硬链接，失败时降级为复制"""
-    try:
-        target.hardlink_to(source)
-        print(f"    ✓ 文件硬链接: {target_path} -> {source_path}")
-    except OSError as e:
-        print(f"    警告: 无法创建硬链接，使用复制: {e}")
-        shutil.copy2(source, target)
-
-
-def rebuild_hardlinks(
-    base_dir: Path, feature_key: str, repo_path: Path | None = None
-) -> None:
-    """根据hardlink_mappings.json重建hard links和符号链接
-
-    :param base_dir: 数据集基础目录
-    :param feature_key: feature_key名称
-    :param repo_path: 云端NAS路径（用于拉取缺失文件，None则跳过拉取）
-
-    支持：
-    - 文件级hardlink: 多个文件名指向同一个inode
-    - 目录级symlink: 使用符号链接共享整个目录
-    - 自动拉取缺失的源文件
+def get_directory_size(path: Path) -> int:
     """
-    mappings = load_hardlink_mappings(base_dir, feature_key)
-    if not mappings:
+    递归计算目录大小（字节）。
+
+    Args:
+        path: 目录路径
+
+    Returns:
+        目录总大小（字节）
+    """
+    total_size = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                total_size += entry.stat().st_size
+    except Exception as e:
+        logger.error(f"计算目录大小失败 {path}: {e}")
+        raise FileSyncError(f"计算目录大小失败: {e}") from e
+
+    return total_size
+
+
+def get_available_space(path: Path) -> int:
+    """
+    获取路径所在磁盘的可用空间（字节）。
+
+    Args:
+        path: 文件或目录路径
+
+    Returns:
+        可用空间（字节）
+    """
+    try:
+        stat = shutil.disk_usage(path)
+        return stat.free
+    except Exception as e:
+        logger.error(f"获取可用空间失败 {path}: {e}")
+        raise FileSyncError(f"获取可用空间失败: {e}") from e
+
+
+def load_json_file(file_path: Path) -> dict:
+    """
+    加载 JSON 文件。
+
+    Args:
+        file_path: JSON 文件路径
+
+    Returns:
+        解析后的字典
+    """
+    try:
+        if not file_path.exists():
+            return {}
+
+        with open(file_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"加载 JSON 文件失败 {file_path}: {e}")
+        raise FileSyncError(f"加载 JSON 文件失败: {e}") from e
+
+
+def save_json_file(data: dict, file_path: Path) -> None:
+    """
+    保存字典到 JSON 文件。
+
+    Args:
+        data: 要保存的字典
+        file_path: JSON 文件路径
+    """
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"保存 JSON 文件失败 {file_path}: {e}")
+        raise FileSyncError(f"保存 JSON 文件失败: {e}") from e
+
+
+def update_timestamp(dataset_path: Path) -> None:
+    """
+    更新数据集的时间戳。
+
+    Args:
+        dataset_path: 数据集路径
+    """
+    import time
+
+    timestamp_file = dataset_path / UPDATE_TIME_NAME
+    timestamp_data = {"last_update": time.time()}
+    save_json_file(timestamp_data, timestamp_file)
+    logger.info(f"更新时间戳: {dataset_path.name}")
+
+
+def get_buffer_size() -> Optional[int]:
+    """
+    从环境变量获取缓存大小限制（字节）。
+
+    Returns:
+        缓存大小（字节），如果未设置返回 None
+    """
+    buffer_size_str = os.getenv(BUFFER_SIZE_ENV)
+    if buffer_size_str:
+        try:
+            return int(buffer_size_str)
+        except ValueError:
+            logger.warning(f"无效的缓存大小设置: {buffer_size_str}")
+    return None
+
+
+def is_auto_cleanup_enabled() -> bool:
+    """
+    检查是否启用自动清理。
+
+    Returns:
+        是否启用自动清理
+    """
+    return os.getenv(AUTO_CLEANUP_ENV, "1").lower() in ("1", "true", "yes")
+
+
+# ============================================================================
+# 核心功能函数
+# ============================================================================
+
+
+def memory_manage(local_root: Path, dataset_name: str, required_space: int) -> None:
+    """
+    内存管理：确保有足够空间，必要时删除最老的数据集。
+
+    Args:
+        local_root: 本地根目录
+        dataset_name: 当前数据集名称
+        required_space: 所需空间（字节）
+
+    Raises:
+        InsufficientSpaceError: 空间不足
+    """
+    if not is_auto_cleanup_enabled():
+        logger.info("自动清理未启用，跳过内存管理")
         return
 
-    print(f"  重建链接: {len(mappings)}个映射")
+    buffer_size = get_buffer_size()
+    if buffer_size is None:
+        logger.info("未设置缓存大小限制，跳过内存管理")
+        return
 
-    for target_path, source_path in mappings.items():
-        target = base_dir / target_path
-        source = base_dir / source_path
+    available_space = get_available_space(local_root)
 
-        # 如果源不存在，尝试从云端拉取
-        if not source.exists():
-            if not repo_path:
-                print(f"    警告: 源不存在且无法拉取: {source_path}")
-                continue
-            print(f"    源不存在，尝试从云端拉取: {source_path}")
-            if not pull_missing_file(repo_path, base_dir, source_path):
-                continue
+    # 检查总空间是否足够
+    if available_space + buffer_size < required_space:
+        raise InsufficientSpaceError(
+            f"总空间不足：需要 {required_space / 1024**3:.2f}GB，"
+            f"但总可用空间仅 {(available_space + buffer_size) / 1024**3:.2f}GB"
+        ) from None
 
-        # 确保目标父目录存在
-        target.parent.mkdir(parents=True, exist_ok=True)
+    # 如果当前可用空间足够，直接返回
+    if available_space >= required_space:
+        logger.info(f"可用空间充足: {available_space / 1024**3:.2f}GB")
+        return
 
-        # 如果目标已存在，先删除
-        if target.exists() or target.is_symlink():
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
+    # 收集所有数据集及其时间戳
+    datasets = []
+    for dataset_dir in local_root.iterdir():
+        if not dataset_dir.is_dir():
+            continue
+        if dataset_dir.name == dataset_name:
+            continue  # 不删除当前数据集
 
-        # 根据源类型选择链接方式
-        if source.is_dir():
-            _create_directory_symlink(target, source, target_path, source_path)
+        timestamp_file = dataset_dir / UPDATE_TIME_NAME
+        if timestamp_file.exists():
+            timestamp_data = load_json_file(timestamp_file)
+            last_update = timestamp_data.get("last_update", 0)
         else:
-            _create_file_hardlink(target, source, target_path, source_path)
+            last_update = dataset_dir.stat().st_mtime
+
+        dataset_size = get_directory_size(dataset_dir)
+        datasets.append((last_update, dataset_dir, dataset_size))
+
+    # 按时间戳排序（最老的在前）
+    datasets.sort(key=lambda x: x[0])
+
+    # 删除最老的数据集直到空间足够
+    for _, dataset_dir, dataset_size in datasets:
+        if available_space >= required_space:
+            break
+
+        logger.info(
+            f"删除旧数据集以释放空间: {dataset_dir.name} "
+            f"({dataset_size / 1024**3:.2f}GB)"
+        )
+
+        try:
+            shutil.rmtree(dataset_dir)
+            available_space += dataset_size
+        except Exception as e:
+            logger.error(f"删除数据集失败 {dataset_dir.name}: {e}")
+
+    # 最终检查
+    if available_space < required_space:
+        raise InsufficientSpaceError(
+            f"即使删除最老的数据集后仍然空间不足：需要 {required_space / 1024**3:.2f}GB，"
+            f"但仅有 {available_space / 1024**3:.2f}GB"
+        ) from None
+
+    logger.info(f"内存管理完成，可用空间: {available_space / 1024**3:.2f}GB")
+
+
+def tar_pull(
+    nas_path: Path,
+    local_path: Path,
+    dataset_name: str,
+    field_list: list[str],
+    episode_idx_list: list[int],
+) -> None:
+    """
+    拉取并解压 tar 包。
+
+    Args:
+        nas_path: NAS 根目录
+        local_path: 本地根目录
+        dataset_name: 数据集名称
+        field_list: 字段列表（如 ['meta', 'data', 'videos']）
+        episode_idx_list: episode 索引列表
+    """
+    dataset_nas = nas_path / dataset_name
+    dataset_local = local_path / dataset_name
+    dataset_local.mkdir(parents=True, exist_ok=True)
+
+    # 1. 拉取 file_tar.json
+    tar_json_nas = dataset_nas / TAR_FILE_NAME
+    tar_json_local = dataset_local / TAR_FILE_NAME
+
+    if not tar_json_nas.exists():
+        raise FileSyncError(f"NAS 上不存在 {TAR_FILE_NAME}: {tar_json_nas}") from None
+
+    shutil.copy2(tar_json_nas, tar_json_local)
+    tar_mapping = load_json_file(tar_json_local)
+
+    # 2. 计算需要下载的 tar 包和所需空间
+    required_tars = set()
+    episode_idx_set = set(episode_idx_list)
+
+    for field in field_list:
+        for file_path, tar_name in tar_mapping.get(field, {}).items():
+            # 解析 episode 索引
+            episode_idx = _extract_episode_idx(file_path)
+            if episode_idx is not None and episode_idx in episode_idx_set:
+                required_tars.add((field, tar_name))
+
+    # 计算所需空间
+    total_required_space = 0
+    for field, tar_name in required_tars:
+        tar_path_nas = dataset_nas / field / tar_name
+        if tar_path_nas.exists():
+            total_required_space += tar_path_nas.stat().st_size
+
+    logger.info(
+        f"需要下载 {len(required_tars)} 个 tar 包，"
+        f"共 {total_required_space / 1024**3:.2f}GB"
+    )
+
+    # 3. 空间检查
+    memory_manage(
+        local_path, dataset_name, total_required_space * 2
+    )  # 解压需要额外空间
+
+    # 4. 下载并解压 tar 包
+    for field, tar_name in required_tars:
+        tar_path_nas = dataset_nas / field / tar_name
+        tar_path_local = dataset_local / field / tar_name
+
+        if not tar_path_nas.exists():
+            logger.warning(f"tar 包不存在: {tar_path_nas}")
+            continue
+
+        # 下载
+        tar_path_local.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"下载 tar 包: {tar_name}")
+        shutil.copy2(tar_path_nas, tar_path_local)
+
+        # 解压
+        logger.info(f"解压 tar 包: {tar_name}")
+        try:
+            with tarfile.open(tar_path_local, "r") as tar:
+                tar.extractall(path=tar_path_local.parent)
+        except Exception as e:
+            logger.error(f"解压失败 {tar_name}: {e}")
+            raise FileSyncError(f"解压失败: {e}") from e
+
+        # 删除 tar 包
+        tar_path_local.unlink()
+
+    # 5. 删除不需要的文件
+    _cleanup_unnecessary_files(dataset_local, field_list, episode_idx_set, tar_mapping)
+
+    # 更新时间戳
+    update_timestamp(dataset_local)
+    logger.info(f"tar_pull 完成: {dataset_name}")
+
+
+def tar_build(
+    local_path: Path,
+    dataset_name: str,
+    field_list: list[str],
+    episode_idx_list: list[int],
+) -> None:
+    """
+    构建 tar 包。
+
+    Args:
+        local_path: 本地根目录
+        dataset_name: 数据集名称
+        field_list: 字段列表
+        episode_idx_list: episode 索引列表
+
+    Returns:
+        tar 映射字典 {field: {file_path: tar_name}}
+    """
+    dataset_local = local_path / dataset_name
+
+    if not dataset_local.exists():
+        raise FileSyncError(f"数据集不存在: {dataset_local}") from None
+
+    episode_idx_set = set(episode_idx_list)
+
+    for field in field_list:
+        field_path = dataset_local / field
+        tar_mapping = {}
+        if not field_path.exists():
+            logger.warning(f"字段目录不存在: {field_path}")
+            continue
+        # 获取所有已在 hardlink 中的文件（这些文件不应重复打包）
+        hardlinked_files = set()
+        if (field_path / HARDLINK_MAPPING_NAME).exists():
+            # 加载 hardlink_mappings.json
+            hardlink_file = field_path / HARDLINK_MAPPING_NAME
+            hardlink_mappings = load_json_file(hardlink_file)
+
+            for field_mappings in hardlink_mappings:
+                hardlinked_files.add(field_mappings)
+
+        # tar_mapping[field] = {}
+
+        # 收集需要打包的文件
+        files_to_pack = []
+        for file_path in field_path.rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            episode_idx = _extract_episode_idx(str(file_path))
+            if episode_idx is None or episode_idx not in episode_idx_set:
+                continue
+
+            # 跳过已在 hardlink 中的文件
+            relative_path = file_path.relative_to(dataset_local)
+            if str(relative_path) in hardlinked_files:
+                logger.debug(f"跳过 hardlink 文件: {relative_path}")
+                continue
+
+            file_size = file_path.stat().st_size
+            files_to_pack.append((file_path, file_size))
+
+        # 按文件大小排序（大文件优先）
+        files_to_pack.sort(key=lambda x: x[1], reverse=True)
+
+        # 打包文件
+        tar_id = 0
+        current_tar_files = []
+        current_tar_size = 0
+
+        for file_path, file_size in files_to_pack:
+            current_tar_files.append(file_path)
+            current_tar_size += file_size
+
+            # 如果达到阈值，创建 tar 包
+            if current_tar_size >= TAR_SIZE_THRESHOLD:
+                tar_name = f"tar_{tar_id:03d}.tar"
+                _create_tar_archive(
+                    dataset_local, field_path, tar_name, current_tar_files, tar_mapping
+                )
+
+                tar_id += 1
+                current_tar_files = []
+                current_tar_size = 0
+
+        # 处理剩余文件
+        if current_tar_files:
+            tar_name = f"tar_{tar_id:03d}.tar"
+            _create_tar_archive(
+                dataset_local, field_path, tar_name, current_tar_files, tar_mapping
+            )
+
+        # 保存 tar 映射
+        tar_json_path = dataset_local / field / TAR_FILE_NAME
+        save_json_file(tar_mapping, tar_json_path)
+
+    logger.info(f"tar_build 完成: {dataset_name}")
+
+
+def tar_push(
+    local_path: Path,
+    nas_path: Path,
+    dataset_name: str,
+    field_list: list[str],
+    episode_idx_list: list[int],
+) -> None:
+    """
+    构建并上传 tar 包到 NAS。
+
+    Args:
+        local_path: 本地根目录
+        nas_path: NAS 根目录
+        dataset_name: 数据集名称
+        field_list: 字段列表
+        episode_idx_list: episode 索引列表
+    """
+    dataset_local = local_path / dataset_name
+    dataset_nas = nas_path / dataset_name
+    dataset_nas.mkdir(parents=True, exist_ok=True)
+
+    # 构建 tar 包
+    logger.info(f"开始构建 tar 包: {dataset_name}")
+    tar_mapping = tar_build(local_path, dataset_name, field_list, episode_idx_list)
+
+    # 上传 tar 包
+    for field in field_list:
+        field_local = dataset_local / field
+        field_nas = dataset_nas / field
+        field_nas.mkdir(parents=True, exist_ok=True)
+
+        for tar_name in set(tar_mapping.get(field, {}).values()):
+            tar_local = field_local / tar_name
+            tar_nas = field_nas / tar_name
+
+            if not tar_local.exists():
+                logger.warning(f"tar 包不存在: {tar_local}")
+                continue
+
+            logger.info(f"上传 tar 包: {tar_name}")
+            shutil.copy2(tar_local, tar_nas)
+
+    # 上传 file_tar.json
+    tar_json_local = dataset_local / TAR_FILE_NAME
+    tar_json_nas = dataset_nas / TAR_FILE_NAME
+    shutil.copy2(tar_json_local, tar_json_nas)
+
+    # 更新时间戳
+    update_timestamp(dataset_local)
+    update_timestamp(dataset_nas)
+
+    logger.info(f"tar_push 完成: {dataset_name}")
 
 
 def pull_files(
-    repo_path: str | Path,
-    feature_keys: list[str] | None = None,
+    nas_path: Path,
+    local_path: Path,
+    dataset_name: str,
+    field_list: list[str],
+    episode_idx_list: list[int],
 ) -> None:
     """
-    从云端NAS拉取文件到本地sync_files
-    :param repo_path: 云端NAS数据集路径
-    :param feature_keys: 要同步的特征列表
+    拉取原始文件（增量更新）。
+
+    Args:
+        nas_path: NAS 根目录
+        local_path: 本地根目录
+        dataset_name: 数据集名称
+        field_list: 字段列表
+        episode_idx_list: episode 索引列表
     """
-    if ROBOCOIN_PIPELINE_DISTRIBUTION_MODE == 0:
-        return
+    dataset_nas = nas_path / dataset_name
+    dataset_local = local_path / dataset_name
+    dataset_local.mkdir(parents=True, exist_ok=True)
 
-    repo_path = Path(repo_path)
-    dataset_name = get_dataset_name(repo_path)
-    sync_dir = SYNC_BASE_DIR / dataset_name
-    sync_dir.mkdir(parents=True, exist_ok=True)
+    episode_idx_set = set(episode_idx_list)
 
-    feature_config = load_feature_config()
+    for field in field_list:
+        logger.info(f"处理字段: {field}")
 
-    # 加载云端和本地metadata
-    nas_metadata_path = repo_path / METADATA_FILE
-    local_metadata_path = sync_dir / METADATA_FILE
+        field_nas = dataset_nas / field
+        field_local = dataset_local / field
+        field_local.mkdir(parents=True, exist_ok=True)
 
-    nas_metadata = (
-        load_metadata(nas_metadata_path) if nas_metadata_path.exists() else {}
-    )
-    local_metadata = load_metadata(local_metadata_path)
+        # 1. 拉取 hardlink_mappings.json
+        hardlink_nas = field_nas / HARDLINK_MAPPING_NAME
+        hardlink_local = field_local / HARDLINK_MAPPING_NAME
 
-    # 为云端metadata中不存在的feature_key初始化UUID
-    metadata_updated = False
-    for feature_key in feature_config:
-        if feature_key not in nas_metadata:
-            ensure_feature_uuid(nas_metadata, feature_key)
-            metadata_updated = True
-            print(f"为新feature_key初始化UUID: {feature_key}")
+        if hardlink_nas.exists():
+            shutil.copy2(hardlink_nas, hardlink_local)
+            hardlink_mappings = load_json_file(hardlink_local)
 
-    # 如果有更新，保存到本地和云端
-    if metadata_updated:
-        save_metadata(local_metadata_path, nas_metadata)
-        nas_metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        save_metadata(nas_metadata_path, nas_metadata)
-        print("元数据已更新并同步到云端")
-    elif nas_metadata_path.exists():
-        # 如果云端有metadata且无更新，只拉取到本地
-        shutil.copy2(nas_metadata_path, local_metadata_path)
-        print(f"拉取元数据: {METADATA_FILE}")
+            # 2. 递归拉取依赖的字段（沿着 hardlink 链）
+            _pull_hardlink_dependencies(
+                nas_path,
+                local_path,
+                dataset_name,
+                field,
+                hardlink_mappings,
+                episode_idx_set,
+            )
 
-    # 重新加载本地metadata
-    local_metadata = load_metadata(local_metadata_path)
+        # 3. 备份本地 file_hash.json
+        hash_local = field_local / HASH_FILE_NAME
+        hash_local_backup = field_local / f"local_{HASH_FILE_NAME}"
 
-    for feature_key in feature_keys or []:
-        if feature_key not in feature_config:
-            print(f"未知的feature_key: {feature_key}")
-            continue
+        if hash_local.exists():
+            shutil.copy2(hash_local, hash_local_backup)
+            local_hashes = load_json_file(hash_local_backup)
+        else:
+            local_hashes = {}
 
-        # 检查本地是否有实际数据文件
-        file_paths = feature_config[feature_key]
-        has_local_data = any((sync_dir / path).exists() for path in file_paths)
+        # 4. 拉取 NAS 上的 file_hash.json
+        hash_nas = field_nas / HASH_FILE_NAME
+        if hash_nas.exists():
+            shutil.copy2(hash_nas, hash_local)
+            remote_hashes = load_json_file(hash_local)
+        else:
+            logger.warning(f"NAS 上不存在 {HASH_FILE_NAME}: {hash_nas}")
+            remote_hashes = {}
 
-        # 检查UUID是否匹配
-        nas_uuid = nas_metadata.get(feature_key, {}).get("uuid")
-        local_uuid = local_metadata.get(feature_key, {}).get("uuid")
+        # 5. 对比并删除差集
+        local_files = set(local_hashes.keys())
+        remote_files = set(remote_hashes.keys())
+        files_to_delete = local_files - remote_files
 
-        if has_local_data and nas_uuid and local_uuid and nas_uuid == local_uuid:
-            print(f"跳过 {feature_key}: UUID匹配且本地有数据，无需拉取")
-            continue
+        for file_rel_path in files_to_delete:
+            file_local = field_local / file_rel_path
+            if file_local.exists():
+                logger.info(f"删除多余文件: {file_rel_path}")
+                file_local.unlink()
 
-        print(f"拉取 {feature_key} (UUID不匹配或本地无数据)")
-
-        for file_path in feature_config[feature_key]:
-            src = repo_path / file_path
-            dst = sync_dir / file_path
-
-            if not src.exists():
-                print(f"  源文件不存在: {src}")
+        # 6. 拉取本地不存在或哈希不匹配的文件
+        for file_rel_path, remote_hash in remote_hashes.items():
+            episode_idx = _extract_episode_idx(file_rel_path)
+            if episode_idx is not None and episode_idx not in episode_idx_set:
                 continue
 
-            dst.parent.mkdir(parents=True, exist_ok=True)
+            file_local = field_local / file_rel_path
+            file_nas = field_nas / file_rel_path
 
-            if src.is_dir():
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-                print(f"  拉取目录: {file_path}")
+            # 检查是否需要下载
+            need_download = False
+            if not file_local.exists():
+                need_download = True
             else:
-                shutil.copy2(src, dst)
-                print(f"  拉取文件: {file_path}")
+                local_hash = local_hashes.get(file_rel_path)
+                if local_hash != remote_hash:
+                    need_download = True
 
-        # 拉取完成后重建hard links（传入repo_path以便拉取缺失文件）
-        rebuild_hardlinks(sync_dir, feature_key, repo_path)
+            if need_download:
+                if not file_nas.exists():
+                    logger.warning(f"NAS 上文件不存在: {file_nas}")
+                    continue
+
+                logger.info(f"下载文件: {file_rel_path}")
+                file_local.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(file_nas, file_local)
+
+        # 清理备份
+        if hash_local_backup.exists():
+            hash_local_backup.unlink()
+
+    # 更新时间戳
+    update_timestamp(dataset_local)
+    logger.info(f"pull_files 完成: {dataset_name}")
 
 
-def push_files(
-    repo_path: str | Path,
-    feature_keys: list[str] | None = None,
+def rebuild_hardlink(
+    dataset_path: Path, field_list: Optional[list[str]] = None
 ) -> None:
     """
-    从本地sync_files推送文件到云端NAS
-    :param repo_path: 云端NAS数据集路径
-    :param feature_keys: 要同步的特征列表
+    根据 hardlink_mappings.json 重建硬链接。
+
+    Args:
+        dataset_path: 数据集路径
+        field_list: 字段列表（如果为 None，则处理所有字段）
     """
-    if ROBOCOIN_PIPELINE_DISTRIBUTION_MODE == 0:
+    hardlink_file = dataset_path / HARDLINK_MAPPING_NAME
+
+    if not hardlink_file.exists():
+        logger.warning(f"hardlink_mappings.json 不存在: {hardlink_file}")
         return
 
-    repo_path = Path(repo_path)
-    dataset_name = get_dataset_name(repo_path)
-    sync_dir = SYNC_BASE_DIR / dataset_name
+    hardlink_mappings = load_json_file(hardlink_file)
 
-    if not sync_dir.exists():
-        print(f"同步目录不存在: {sync_dir}")
+    if field_list is None:
+        field_list = list(hardlink_mappings.keys())
+
+    for field in field_list:
+        field_mappings = hardlink_mappings.get(field, {})
+
+        for link_path_str, target_path_str in field_mappings.items():
+            link_path = dataset_path / link_path_str
+            target_path = dataset_path / target_path_str
+
+            if not target_path.exists():
+                logger.warning(f"目标文件不存在: {target_path}")
+                continue
+
+            # 删除已存在的链接
+            if link_path.exists():
+                link_path.unlink()
+
+            # 创建硬链接
+            link_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(target_path, link_path)
+                logger.debug(f"创建硬链接: {link_path_str} -> {target_path_str}")
+            except Exception as e:
+                logger.error(f"创建硬链接失败 {link_path_str}: {e}")
+
+    logger.info(f"rebuild_hardlink 完成: {dataset_path.name}")
+
+
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+
+def _extract_episode_idx(file_path: str) -> Optional[int]:
+    """
+    从文件路径中提取 episode 索引。
+
+    Args:
+        file_path: 文件路径
+
+    Returns:
+        episode 索引，如果无法提取则返回 None
+    """
+    import re
+
+    # 匹配 episode_000123 这样的模式
+    match = re.search(r"episode_(\d+)", file_path)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _create_tar_archive(
+    dataset_path: Path,
+    field_path: Path,
+    tar_name: str,
+    files: list[Path],
+    tar_mapping: dict[str, str],
+) -> None:
+    """
+    创建 tar 归档文件。
+
+    Args:
+        dataset_path: 数据集路径
+        field_path: 字段路径
+        tar_name: tar 文件名
+        files: 要打包的文件列表
+        tar_mapping: tar 映射字典（字段级）
+    """
+    tar_path = field_path / tar_name
+
+    try:
+        with tarfile.open(tar_path, "w") as tar:
+            for file_path in files:
+                arcname = file_path.relative_to(field_path)
+                tar.add(file_path, arcname=arcname)
+
+                # 更新映射
+                relative_path = file_path.relative_to(dataset_path)
+                tar_mapping[str(relative_path)] = tar_name
+
+        logger.info(f"创建 tar 包: {tar_name} ({len(files)} 个文件)")
+    except Exception as e:
+        logger.error(f"创建 tar 包失败 {tar_name}: {e}")
+        raise FileSyncError(f"创建 tar 包失败: {e}") from e
+
+
+def _cleanup_unnecessary_files(
+    dataset_path: Path,
+    field_list: list[str],
+    episode_idx_set: set[int],
+) -> None:
+    """
+    删除不需要的文件。
+
+    Args:
+        dataset_path: 数据集路径
+        field_list: 字段列表
+        episode_idx_set: episode 索引集合
+        tar_mapping: tar 映射
+    """
+    for field in field_list:
+        field_path = dataset_path / field
+        if not field_path.exists():
+            continue
+
+        for file_path in field_path.rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            episode_idx = _extract_episode_idx(str(file_path))
+            if episode_idx is not None and episode_idx not in episode_idx_set:
+                logger.info(f"删除不需要的文件: {file_path.relative_to(dataset_path)}")
+                file_path.unlink()
+
+
+def _pull_hardlink_dependencies(
+    nas_path: Path,
+    local_path: Path,
+    dataset_name: str,
+    field: str,
+    hardlink_mappings: dict[str, str],
+    episode_idx_set: set[int],
+    visited: Optional[set[str]] = None,
+) -> None:
+    """
+    递归拉取 hardlink 依赖的字段。
+
+    Args:
+        nas_path: NAS 根目录
+        local_path: 本地根目录
+        dataset_name: 数据集名称
+        field: 当前字段
+        hardlink_mappings: hardlink 映射
+        episode_idx_set: episode 索引集合
+        visited: 已访问的字段集合（用于防止循环依赖）
+    """
+    if visited is None:
+        visited = set()
+
+    if field in visited:
         return
 
-    feature_config = load_feature_config()
-    local_metadata_path = sync_dir / METADATA_FILE
-    local_metadata = load_metadata(local_metadata_path)
+    visited.add(field)
 
-    # 加载云端metadata
-    nas_metadata_path = repo_path / METADATA_FILE
-    nas_metadata = (
-        load_metadata(nas_metadata_path) if nas_metadata_path.exists() else {}
+    # 找出依赖的字段
+    dependent_fields = set()
+    for target_path in hardlink_mappings.values():
+        # target_path 格式如 "field_name/subdir/file.ext"
+        parts = Path(target_path).parts
+        if parts:
+            dependent_field = parts[0]
+            dependent_fields.add(dependent_field)
+
+    # 递归拉取依赖字段
+    for dep_field in dependent_fields:
+        if dep_field == field:
+            continue
+
+        logger.info(f"拉取依赖字段: {dep_field}")
+
+        # 简化版：直接拉取整个字段（实际应该只拉取需要的文件）
+        dep_field_nas = nas_path / dataset_name / dep_field
+        dep_field_local = local_path / dataset_name / dep_field
+
+        if dep_field_nas.exists():
+            dep_field_local.mkdir(parents=True, exist_ok=True)
+
+            # 拉取该字段的 hardlink_mappings.json
+            dep_hardlink_nas = dep_field_nas / HARDLINK_MAPPING_NAME
+            dep_hardlink_local = dep_field_local / HARDLINK_MAPPING_NAME
+
+            if dep_hardlink_nas.exists():
+                shutil.copy2(dep_hardlink_nas, dep_hardlink_local)
+                dep_hardlink_mappings = load_json_file(dep_hardlink_local)
+
+                # 递归
+                _pull_hardlink_dependencies(
+                    nas_path,
+                    local_path,
+                    dataset_name,
+                    dep_field,
+                    dep_hardlink_mappings,
+                    episode_idx_set,
+                    visited,
+                )
+
+            # 拉取文件（简化版：拉取所有文件）
+            for file_nas in dep_field_nas.rglob("*"):
+                if not file_nas.is_file():
+                    continue
+
+                if file_nas.name in [
+                    HARDLINK_MAPPING_NAME,
+                    HASH_FILE_NAME,
+                    TAR_FILE_NAME,
+                ]:
+                    continue
+
+                episode_idx = _extract_episode_idx(str(file_nas))
+                if episode_idx is not None and episode_idx not in episode_idx_set:
+                    continue
+
+                file_local = dep_field_local / file_nas.relative_to(dep_field_nas)
+                if not file_local.exists():
+                    file_local.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(file_nas, file_local)
+
+
+if __name__ == "__main__":
+    tar_build(
+        local_path=Path("sync_files"),
+        dataset_name="RMC-AIDA-L_box_up_down",
+        field_list=["merged", "format_convert", "motion_annotation"],
+        episode_idx_list=list(range(0, 200)),
     )
-
-    # 为云端metadata中不存在的新feature_key初始化UUID
-    for feature_key in feature_config:
-        if feature_key not in nas_metadata:
-            ensure_feature_uuid(nas_metadata, feature_key)
-            print(f"为新feature_key初始化UUID: {feature_key}")
-
-    for feature_key in feature_keys or []:
-        if feature_key not in feature_config:
-            print(f"未知的feature_key: {feature_key}")
-            continue
-
-        # 检查本地是否有这个feature_key的数据
-        if feature_key not in local_metadata:
-            print(f"跳过 {feature_key}: 本地无此feature_key数据")
-            continue
-
-        # 检查UUID是否匹配
-        nas_uuid = nas_metadata.get(feature_key, {}).get("uuid")
-        local_uuid = local_metadata.get(feature_key, {}).get("uuid")
-
-        if nas_uuid and local_uuid and nas_uuid == local_uuid:
-            print(f"跳过 {feature_key}: UUID匹配，无需推送")
-            continue
-
-        print(f"推送 {feature_key} (UUID不匹配或本地有更新)")
-
-        # 更新本地metadata的UUID到云端（保持本地的UUID）
-        nas_metadata[feature_key] = local_metadata[feature_key]
-
-        # 收集已推送文件用于检查硬链接
-        pushed_files = set()
-
-        for file_path in feature_config[feature_key]:
-            src = sync_dir / file_path
-            dst = repo_path / file_path
-
-            if not src.exists():
-                print(f"  源文件不存在: {src}")
-                continue
-
-            # 如果是文件且是硬链接，检查是否已推送过源文件
-            if src.is_file() and any(
-                is_hardlink(src, sync_dir / pushed) for pushed in pushed_files
-            ):
-                print(f"  跳过硬链接: {file_path} (已推送源文件)")
-                continue
-
-            dst.parent.mkdir(parents=True, exist_ok=True)
-
-            if src.is_dir():
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-                print(f"  推送目录: {file_path}")
-            else:
-                shutil.copy2(src, dst)
-                print(f"  推送文件: {file_path}")
-                pushed_files.add(file_path)
-
-        # 推送完成后重建hard links（不需要repo_path参数）
-        rebuild_hardlinks(repo_path, feature_key, None)
-
-    # 推送合并后的metadata到云端
-    nas_metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    save_metadata(nas_metadata_path, nas_metadata)
-    print(f"元数据已保存并推送: {nas_metadata_path}")
-
-
-def sync_files(
-    repo_path: str | Path,
-    feature_keys: list[str] | None = None,
-    direction: Literal["pull", "push"] = "pull",
-) -> None:
-    """
-    同步文件(pull或push)
-    :param repo_path: 云端NAS数据集路径
-    :param feature_keys: 要同步的特征列表
-    :param direction: 同步方向 'pull'(从云端NAS到本地sync_files) 或 'push'(从本地sync_files到云端NAS)
-    """
-    if direction == "pull":
-        pull_files(repo_path, feature_keys)
-    elif direction == "push":
-        push_files(repo_path, feature_keys)
-    else:
-        raise ValueError(f"不支持的同步方向: {direction}")
+    pass

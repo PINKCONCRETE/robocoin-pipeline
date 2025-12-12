@@ -1,277 +1,238 @@
-# utils说明
 
-## file_sync.py
+# 需求列表
 
-文件同步工具，支持在云端NAS和本地sync_files之间双向同步数据，使用UUID追踪机制确保数据一致性和增量更新。
+## 必要结论
 
-### 工作原理
+- **仅在下载时保证文件安全**
 
-```mermaid
-graph LR
-    A[云端NAS数据集] -->|pull| B[本地sync_files]
-    B -->|push| A
-    
-    subgraph "UUID追踪机制"
-        C[.sync_metadata.json]
-        D[feature_key → UUID映射]
-    end
-    
-    B -.存储.-> C
-    A -.存储.-> C
-    C --> D
-    
-    style A fill:#e1f5ff
-    style B fill:#fff4e1
-    style C fill:#f0f0f0
-```
+- **hardlink_mapping.json一定要存文件级的hardlink**
 
-### 核心概念
+- **只有文件存在的时候关心版本号**
 
-- **Pull**: 从云端NAS拉取数据到本地 `sync_files/[dataset_name]/`
-- **Push**: 从本地sync_files推送数据到云端NAS
-- **UUID追踪**: 每个feature_key有唯一UUID，通过比对UUID判断是否需要同步
-- **增量更新**: 只同步UUID不匹配的数据，避免不必要的文件传输
+- **存储文件哈希值**
 
-### 配置
+- **沿着hardlink链递归拉取，先取差集删除再增量拉取**
 
-在 [`config.py`](../config.py) 中设置 `ROBOCOIN_PIPELINE_DISTRIBUTION_MODE`:
-- `0`: 本地开发模式（禁用同步）
-- `1`: 集群分布式模式（启用同步）
+## 工具
 
-在 [`feature_key.yaml`](feature_key.yaml) 中配置feature_key与文件路径的映射关系。
+文件hash？(hashlib md5)
 
-### API使用
+## 方法说明
 
-#### pull_files - 从云端拉取数据
+### memory_manage（tar_pull会调用）
 
-```python
-from robocoin_pipeline.utils.file_sync import pull_files
+前置要求：
+tar_pull已将file_tar.json下载下来了
 
-# 从云端NAS拉取指定feature的数据到本地sync_files
-pull_files(
-    repo_path="/mnt/nas/synnas/docker2/robocoin-datasets/unitree_g1_basket_storage_peach",
-    feature_keys=["scenec_annotation"],
-)
-```
+输入：
 
-**执行流程**:
-1. 检查云端是否有 `.sync_metadata.json`，如果没有则为所有feature_key初始化UUID
-2. 比对云端和本地的UUID
-3. 只拉取UUID不匹配或本地无数据的feature
+- dataset_name
+- field_list
+- episode_idx_list
 
-#### push_files - 推送数据到云端
+算法：
 
-```python
-from robocoin_pipeline.utils.file_sync import push_files
+1. 读取file_tar.json并计算所有要下载的tar先加入set(防止重复计算)，计算出所需空间，并计算现在还剩的空间
+2. 若总空间（用户设定的本来就不够）不够，直接报错
+3. 若总空间够，则尝试删除最老的dataset直到剩余空间够
 
-# 将本地sync_files的数据推送到云端NAS
-push_files(
-    repo_path="/mnt/nas/synnas/docker2/robocoin-datasets/unitree_g1_basket_storage_peach",
-    feature_keys=["scenec_annotation"],
-)
-```
+注意：**pull和push都要更新dataset的timestamp**
 
-**执行流程**:
-1. 为云端metadata中不存在的新feature_key初始化UUID
-2. 比对云端和本地的UUID
-3. 只推送UUID不匹配的feature，并更新云端metadata
+输出：无
 
-#### sync_files - 统一同步接口
+### tar_pull（代理数据的下载）
 
-```python
-from robocoin_pipeline.utils.file_sync import sync_files
+输入:
 
-# Pull模式
-sync_files(
-    repo_path="/mnt/nas/synnas/docker2/robocoin-datasets/my_dataset",
-    feature_keys=["scenec_annotation", "state_action"],
-    direction="pull",
-)
+- dataset_name
+- field_list
+- episode_idx_list
 
-# Push模式
-sync_files(
-    repo_path="/mnt/nas/synnas/docker2/robocoin-datasets/my_dataset",
-    feature_keys=["scenec_annotation"],
-    direction="push",
-)
-```
+算法：
 
-### 完整示例
+1. 拉取file_tar.json
+2. 空间检查
+3. 拉取所需的tar，并解压
+4. 删除不需要的文件
 
-创建文件 `test_sync.py`:
+### tar_build
 
-```python
-"""测试文件同步功能"""
-from pathlib import Path
-from robocoin_pipeline.utils.file_sync import pull_files, push_files
+输入:
 
-# 数据集路径
-DATASET_PATH = "/mnt/nas/synnas/docker2/robocoin-datasets/unitree_g1_basket_storage_peach"
-FEATURES = ["scenec_annotation"]
+- dataset_name
+- field_list
+- episode_idx_list
 
-def test_pull():
-    """测试从云端拉取数据"""
-    print("=" * 60)
-    print("测试: Pull数据从云端NAS")
-    print("=" * 60)
-    pull_files(repo_path=DATASET_PATH, feature_keys=FEATURES)
-    
-    # 验证本地文件
-    sync_dir = Path(__file__).parent.parent.parent.parent / "sync_files"
-    dataset_name = Path(DATASET_PATH).name
-    local_path = sync_dir / dataset_name
-    
-    print(f"\n本地同步目录: {local_path}")
-    print(f"元数据文件: {local_path / '.sync_metadata.json'}")
+假设文件结构是：
 
-def test_push():
-    """测试推送数据到云端（使用测试目录）"""
-    print("\n" + "=" * 60)
-    print("测试: Push数据到测试目录")
-    print("=" * 60)
-    
-    # 推送到临时测试目录避免影响真实数据
-    test_path = "/tmp/test_nas_dataset/unitree_g1_basket_storage_peach"
-    push_files(repo_path=test_path, feature_keys=FEATURES)
-    
-    print(f"\n测试目录: {test_path}")
-    print(f"元数据文件: {test_path}/.sync_metadata.json")
+- meta
+- data
+- video
 
-if __name__ == "__main__":
-    test_pull()
-    test_push()
-```
+会自动将meta和data下的和video下的都打包
 
-运行测试:
-```bash
-python test_sync.py
-```
+算法：
+遍历上述的几个文件夹
 
-### Metadata文件格式
+1. 遍历文件夹中的在episode_idx_list有的文件
+2. 按自增id创建tar包
+3. 如果文件在hardlink_mapping.json中则跳过（防止重复上传，只保留原始文件）。否则向其中添加文件直到大小>=50MB，并将文件所在tar包信息写入json，并将tar包的大小写入json中
+4. 直到所有episode_idx_list对应idx的文件都被添加完毕
 
-`.sync_metadata.json` 示例:
+### tar_push
 
-```json
-{
-  "scenec_annotation": {
-    "uuid": "9654d118-026d-4f28-99a2-559cb9c826e5",
-    "created_at": "2025-12-03T22:03:38.021661"
-  },
-  "state_action": {
-    "uuid": "a7b3c8d9-1234-5678-90ab-cdef12345678",
-    "created_at": "2025-12-03T22:10:15.123456"
-  }
-}
-```
+输入:
 
-### 示例目录结构
+- dataset_name
+- field_list
+- episode_idx_list
 
-```plaintext
-.
-└── RMC-AIDA-L_box_up_down
-    ├── dataset_info.yaml
-    ├── format_convert
-    │   ├── data
-    │   │   └── chunk-000
-    │   ├── meta
-    │   │   ├── info.json
-    │   │   └── tasks.jsonl
-    │   └── videos
-    │       └── chunk-000
-    │           ├── observation.images.cam_high_rgb
-    │           ├── observation.images.cam_left_wrist_rgb
-    │           └── observation.images.cam_right_wrist_rgb
-    ├── merged
-    │   ├── data
-    │   │   └── chunk-000
-    │   ├── hardlink_mappings.json
-    │   ├── meta
-    │   │   ├── annotations
-    │   │   │   ├── eef_acc_mag_annotation.jsonl
-    │   │   │   ├── eef_direction_annotation.jsonl
-    │   │   │   ├── eef_velocity_annotation.jsonl
-    │   │   │   ├── gripper_activity_annotation.jsonl
-    │   │   │   ├── gripper_mode_annotation.jsonl
-    │   │   │   ├── scene_annotations.jsonl
-    │   │   │   └── subtask_annotations.jsonl
-    │   │   ├── info.json
-    │   │   ├── merged_info.json
-    │   │   ├── motion_annotation_info.json
-    │   │   ├── ori_info.json
-    │   │   ├── quality_checked_info.json
-    │   │   ├── quality_checked_tasks.jsonl
-    │   │   ├── scene_annotation_info.json
-    │   │   ├── state_action_info.json
-    │   │   ├── subtask_annotation_info.json
-    │   │   └── tasks.jsonl
-    │   └── videos
-    └── motion_annotation
-        ├── data
-        │   └── chunk-000
-        ├── hardlink_mappings.json
-        ├── meta
-        │   ├── info.json
-        │   └── tasks.jsonl
-        └── videos
+算法：
 
-```
+- 构建包，调用tar_build
 
-### 注意事项
+### pull_files
 
-1. **首次使用**: 首次pull会自动初始化所有feature_key的UUID并同步到云端
-2. **UUID不可手动修改**: UUID由系统自动管理，手动修改会导致同步异常
-3. **增量添加feature**: 新增feature_key时会自动为其初始化UUID
-4. **数据安全**: 使用临时文件+原子重命名确保写入安全
-5. **跳过机制**: UUID匹配且本地有数据时自动跳过同步，节省时间
+输入:
 
-### Hardlink/Symlink重建功能
+- dataset_name
+- field_list
+- episode_idx_list
 
-文件同步工具支持自动重建hard links和符号链接，这对于节省存储空间和保持数据一致性非常有用。
+算法：
+对于每个field
 
-#### 工作原理
+1. 拉取 hardlink_mappings
+2. 先递归拉去要链接的field(依赖于有向无环图！！)
+3. 将本地file_hash.json重命名成local_file_hash.json
+4. 拉取file_hash.json
+5. 与本地local_file_hash.json对比，删除差集
+6. 拉取本地不存在的
 
-1. **Pull操作**: 拉取数据后，自动读取 `[feature_key]/hardlink_mappings.json` 文件
-2. **自动拉取缺失源文件**: 如果源文件/目录不存在，会自动从云端递归拉取
-3. **智能链接创建**:
-   - **文件**: 创建hard link（多个文件名指向同一个inode）
-   - **目录**: 创建符号链接（使用相对路径）
-4. **Push操作**: 推送时自动检测硬链接，跳过已推送的源文件，避免重复传输
-5. **容错处理**: 如果无法创建hard link，会自动降级为文件复制
+输出：
+原始文件
 
-#### hardlink_mappings.json格式
+后续：
+需要调用rebuild_hardlink
 
-```json
-{
-  "merged/meta": "format_convert/meta",
-  "merged/data/chunk-000": "format_convert/data/chunk-000",
-  "merged/videos/observation.images.cam_high_rgb": "format_convert/videos/observation.images.cam_high_rgb"
-}
-```
+### rebuild_hardlink
 
-- **键**: 目标路径（相对于数据集根目录）
-- **值**: 源路径（相对于数据集根目录）
-- **支持类型**: 文件使用hard link，目录使用符号链接
+需要：有完整的的dataset的flow分支
 
-#### 使用场景
+输入：
 
-当多个feature_key共享相同的数据文件或目录时，使用链接可以：
-- **节省存储空间**: 文件级hard link不占用额外空间，目录级symlink共享整个目录树
-- **保持数据一致性**: 多个路径指向同一份数据
-- **提高同步效率**: Push时自动跳过硬链接文件，避免重复上传
-- **自动化管理**: Pull时自动拉取缺失的源文件/目录
+- hardlink_mappings.json
+- 已经下载好的文件
+- 需要update的文件list
 
-#### 注意事项
+算法：
+~~1. 区分是文件夹还是文件
+    1. 是文件则建立硬链接
+    2. 若是文件夹则建立软链接~~
 
-1. **自动拉取**: 源文件/目录缺失时，系统会自动从云端拉取，确保链接创建成功
-2. **跨文件系统**: Hard link无法跨文件系统，此时会自动降级为文件复制
-3. **JSON格式**: 确保 `hardlink_mappings.json` 是有效的JSON格式（无尾部逗号）
-4. **符号链接**: 目录使用相对路径符号链接，移动数据集时链接仍然有效
-5. **Push优化**: 系统通过inode检测硬链接，自动跳过重复推送
+~~1. 安全创建文件硬链接~~
 
-#### 技术细节
+1. 直接覆盖原有硬链接
 
-- **文件级链接**: 使用 `Path.hardlink_to()` 创建hard link，共享inode
-- **目录级链接**: 使用 `Path.symlink_to()` 创建相对路径符号链接
-- **智能检测**: 通过 `st_ino` 比对检测文件是否为硬链接
-- **递归拉取**: 使用 `pull_missing_file()` 递归拉取缺失的源文件和目录
-- **容错降级**: Hard link创建失败时自动降级为 `shutil.copy2()` 复制
+输出：
+
+- 无（重建好的hardlink）
+
+## 草稿
+
+第一性：**同步nas和本地文件**
+
+单位：
+~~数据集-field~~
+数据集-field-episode_idx
+必要输入：
+
+- dataset_name
+- field_list
+- episode_idx_list
+
+方式：
+~~增量更新-只更新有更改的feature？~~
+
+增量更新-**优先保证同步**
+
+只更改需要更改的？~~(hardlink怎么办？)~~
+~~若hardlink_mappings.json有更改则重建hardlink?~~
+
+### 涉及递归重建问题
+
+- 重建需要删除已有的hardlink文件及其链接的文件
+- 涉及增删改，需保证**文件安全** ~~先建立再重命名?~~
+**仅在下载时保证文件安全！**
+
+### 只要有更新必须删除所有hardlink**
+
+~~*最好是只更新需要更新的*  如何找？
+根据更新的field反向查找每个field下的hardlink_mappings.json，查看是否需要更新？
+若只更新了单个episode？
+**说明hardlink_mapping.json**~~尽量~~**一定要存文件级的hardlink**
+根据hardlink_mapping.json即可反向查找所有需要修改hardlink的 *会不会有遗漏的野链接存在？*
+什么时候会有：
+文件更新(且hardlink_mapping.json未更新)时：文件更新->hardlink_mapping.json查询到hardlink文件，删除原hardlink并重建。 不会有问题！
+**hardlink_mapping.json更新时：扫描一遍，删除在json中没有记录的文件！**~~
+
+现在的问题是
+
+如果可以拉取单个文件的话我的版本管理难做
+
+难做在 配置文件也需要存储单个文件的hash值 难做吗？
+还需要反向去建立各种hardlink 如何知道需要建立哪些hardlink
+还需要删除无用的野hardlink
+
+**问题出在上游更新！**
+
+**最好是上游更新则下游也必须更新！
+需要知道上下游关系，但现在缺失这个关系！**
+
+此外更新的单位也有问题，不太可能只做文件级的更新吗？
+
+最好像git一样只做仓库级的更新？
+
+还是说其实不需要反向去传播，需要哪个更新哪个即可，只**需要保证field级的同步，而非dataset级的同步！**
+
+是的，只需要保证单向的，不需要保证双向的。
+
+~~**只要有更新必须重建所有hardlink**~~
+
+~~**pull时不用关心push的事情，版本号是field的版本号**~~
+
+~~**push也是只需要field的版本号**~~
+
+~~**每次拉取都要先清除本地要拉的缓存**~~
+
+沿着hardlink链递归拉取
+
+怎么处理多余的文件？即在云端被删除的文件？
+要删除文件哈希表与云端哈希表的差集的文件，再拉取剩余的
+
+---
+接下来是文件tar管道的问题
+
+第一性：要求：nas上episode仅以tar包形式存储，video又有tar包又有源文件
+，本地需要接收tar包后解压后删除tar包。tar包每个50-100M
+
+问题：如何存储tar包和文件的关系？
+
+使用file_tar.json存储，**存储每个文件存储在哪个tar包中**{[filename]:[tar_name]}
+
+还需要让用户设置环境变量的脚本
+
+---
+关于存储管理：
+
+设置环境变量设置自动存储管理的开启和关闭
+
+一下讨论默认开启的情况
+
+第一性：是为了让缓存的文件不超过用户设定的buffer大小
+
+pull的时候要检查剩余的buffer大小和~~数据集大小~~将要下载的文件的总大小
+
+如果不够，则尝试先将最老的dataset删除。
+
+pull和push都要更新dataset下的update_time.json中的时间戳，这样才方便查找删除哪个
