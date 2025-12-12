@@ -1,3 +1,5 @@
+# ignore: UP006 UP035
+
 """
 用于文件同步的实用程序模块。
 包含内存管理，文件传输和路径处理功能。
@@ -10,7 +12,7 @@ import os
 import shutil
 import tarfile
 from pathlib import Path
-from typing import Optional, dict, list, set
+from typing import Optional
 
 # 配置日志
 logging.basicConfig(
@@ -385,6 +387,8 @@ def tar_build(
 
     Returns:
         tar 映射字典 {field: {file_path: tar_name}}
+
+    只打包指定 episode_idx_list 中的文件，跳过已在 hardlink 中的文件。
     """
     dataset_local = local_path / dataset_name
 
@@ -394,7 +398,7 @@ def tar_build(
     episode_idx_set = set(episode_idx_list)
 
     for field in field_list:
-        field_path = dataset_local / field
+        field_path: Path = dataset_local / field
         tar_mapping = {}
         if not field_path.exists():
             logger.warning(f"字段目录不存在: {field_path}")
@@ -467,7 +471,37 @@ def tar_build(
     logger.info(f"tar_build 完成: {dataset_name}")
 
 
-def tar_push(
+def file_hash_build(
+    local_path: Path,
+    dataset_name: str,
+    field_list: list[str],
+) -> None:
+    """
+    为所有非tar文件计算哈希值并保存
+    """
+    dataset_local = local_path / dataset_name
+    for field in field_list:
+        field_path: Path = dataset_local / field
+        hash_mapping = {}
+
+        if not field_path.exists():
+            logger.warning(f"字段目录不存在: {field_path}")
+            continue
+
+        for file_path in field_path.rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            relative_path = file_path.relative_to(dataset_local)
+            file_hash = calculate_file_hash(file_path)
+            hash_mapping[str(relative_path)] = file_hash
+
+        # 保存哈希映射
+        hash_json_path = dataset_local / field / HASH_FILE_NAME
+        save_json_file(hash_mapping, hash_json_path)
+
+
+def file_push(
     local_path: Path,
     nas_path: Path,
     dataset_name: str,
@@ -490,15 +524,15 @@ def tar_push(
 
     # 构建 tar 包
     logger.info(f"开始构建 tar 包: {dataset_name}")
-    tar_mapping = tar_build(local_path, dataset_name, field_list, episode_idx_list)
+    tar_build(local_path, dataset_name, field_list, episode_idx_list)
 
     # 上传 tar 包
     for field in field_list:
         field_local = dataset_local / field
         field_nas = dataset_nas / field
         field_nas.mkdir(parents=True, exist_ok=True)
-
-        for tar_name in set(tar_mapping.get(field, {}).values()):
+        tar_mapping = load_json_file(field_local / TAR_FILE_NAME)
+        for tar_name in set(tar_mapping.values()):
             tar_local = field_local / tar_name
             tar_nas = field_nas / tar_name
 
@@ -508,17 +542,71 @@ def tar_push(
 
             logger.info(f"上传 tar 包: {tar_name}")
             shutil.copy2(tar_local, tar_nas)
+    # 计算文件哈希并保存
+    logger.info(f"开始计算文件哈希: {dataset_name}")
+    file_hash_build(local_path, dataset_name, field_list)
 
-    # 上传 file_tar.json
-    tar_json_local = dataset_local / TAR_FILE_NAME
-    tar_json_nas = dataset_nas / TAR_FILE_NAME
-    shutil.copy2(tar_json_local, tar_json_nas)
+    # 上传不在file_tar.json和hardlink_mappings.json中的所有文件
+    for field in field_list:
+        field_local = dataset_local / field
+        field_nas = dataset_nas / field
+        field_nas.mkdir(parents=True, exist_ok=True)
+
+        # 加载 tar 映射
+        tar_json_path = field_local / TAR_FILE_NAME
+        tar_mapping_field = load_json_file(tar_json_path)
+        tar_files = set(tar_mapping_field.keys())
+
+        # 加载 hardlink 映射
+        hardlink_file = field_local / HARDLINK_MAPPING_NAME
+        if hardlink_file.exists():
+            hardlink_mappings = load_json_file(hardlink_file)
+            hardlinked_files = set(hardlink_mappings.keys())
+        else:
+            hardlinked_files = set()
+
+        for file_path in field_local.rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            relative_path = file_path.relative_to(dataset_local)
+
+            # 跳过在hardlink_mapping.json中的文件 和 在file_tar.json 中的不在videos下的非tar文件
+            if (
+                str(relative_path) in hardlinked_files
+                or (
+                    str(relative_path) in tar_files
+                    and "/videos/" not in str(relative_path)
+                )
+                or file_path.suffix == ".tar"
+            ):
+                continue
+
+            file_nas = field_nas / file_path.relative_to(field_local)
+            file_nas.parent.mkdir(parents=True, exist_ok=True)
+
+            logger.info(f"上传文件: {relative_path}")
+            shutil.copy2(file_path, file_nas)
+
+    # # 上传 file_tar.json
+    # tar_json_local = dataset_local / TAR_FILE_NAME
+    # tar_json_nas = dataset_nas / TAR_FILE_NAME
+    # shutil.copy2(tar_json_local, tar_json_nas)
+
+    # # 上传 file_hash.json
+    # for field in field_list:
+    #     hash_local = dataset_local / field / HASH_FILE_NAME
+    #     hash_nas = dataset_nas / field / HASH_FILE_NAME
+    #     if hash_local.exists():
+    #         shutil.copy2(hash_local, hash_nas)
+
+    # 上传
 
     # 更新时间戳
     update_timestamp(dataset_local)
     update_timestamp(dataset_nas)
 
-    logger.info(f"tar_push 完成: {dataset_name}")
+    logger.info(f"file_push 完成: {dataset_name}")
 
 
 def pull_files(
@@ -864,8 +952,9 @@ def _pull_hardlink_dependencies(
 
 
 if __name__ == "__main__":
-    tar_build(
+    file_push(
         local_path=Path("sync_files"),
+        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline"),
         dataset_name="RMC-AIDA-L_box_up_down",
         field_list=["merged", "format_convert", "motion_annotation"],
         episode_idx_list=list(range(0, 200)),
