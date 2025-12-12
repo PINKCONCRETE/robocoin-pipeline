@@ -12,6 +12,7 @@ def format_convert(
     repo_path: str | Path,
     in_field: set[str],
     out_field: str,
+    config: dict,
     logger: Logger | None = None,
 ) -> str:
     # """模拟format convert任务"""

@@ -10,6 +10,7 @@ def motion_annotation(
     repo_path: str | Path,
     in_field: set[str],
     out_field: str,
+    config: dict,
     logger: Logger | None = None,
 ) -> None:
     if logger is None:

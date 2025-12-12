@@ -10,6 +10,7 @@ def upload_hf(
     repo_path: str | Path,
     in_field: str,
     out_field: str,
+    config: dict,
     logger: Logger | None = None,
 ) -> None:
     if logger is None:

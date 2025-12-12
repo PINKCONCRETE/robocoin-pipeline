@@ -12,6 +12,7 @@ def subtask_annotation(
     repo_path: str | Path,
     input_field: str,
     output_field: str,
+    config: dict,
     logger: Logger | None = None,
 ) -> None:
     if logger is None:
