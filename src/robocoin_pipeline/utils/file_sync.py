@@ -19,6 +19,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
 logger.setLevel(logging.INFO)
 
 # 常量配置
