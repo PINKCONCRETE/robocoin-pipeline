@@ -1,0 +1,30 @@
+flow_name: test_flow 
+
+tasks:
+  - task_name: format_convert
+    depends_on: []
+    input_from: [raw_data]
+
+  - task_name: subtask_annotation
+    depends_on: [format_convert]
+    input_from: [format_convert]
+
+  - task_name: motion_annotation
+    depends_on: [format_convert]
+    input_from: [format_convert]
+
+  - task_name: data_merge
+    depends_on: [motion_annotation, subtask_annotation]
+    input_from: [motion_annotation, subtask_annotation, format_convert]
+
+  - task_name: upload_hf
+    depends_on: [data_merge]
+    input_from: [data_merge]
+
+  - task_name: upload_ms
+    depends_on: [data_merge]
+    input_from: [data_merge]
+
+  - task_name: update_manager
+    depends_on: [upload_hf, upload_ms]
+    input_from: [upload_hf, upload_ms]

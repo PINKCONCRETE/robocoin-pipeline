@@ -24,13 +24,14 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: System :: Distributed Computing",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 dependencies = [
     "prefect",
     "dask[distributed]>=2023.0.0",
     "prefect-dask>=0.3.0",
     "lerobot",
+    "dacite",
 ]
 
 [project.optional-dependencies]

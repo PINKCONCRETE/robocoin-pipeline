@@ -6,16 +6,16 @@ from .task_registry import register_single_input_field_task
 
 
 @register_single_input_field_task()
-def motion_annotation(
+def upload_ms(
     repo_path: str | Path,
-    in_field: set[str],
+    in_field: str,
     out_field: str,
     config: dict,
     logger: Logger | None = None,
 ) -> None:
     if logger is None:
         logger = getLogger(__name__)
-    """模拟Motion Annotation任务"""
-    logger.info("Begin running motion_annotation")
+    """模拟Upload ModelScope任务"""
+    logger.info("Begin running upload_ms")
     time.sleep(2)
-    logger.info("Finished running motion_annotation")
+    logger.info("Finished running upload_ms")
