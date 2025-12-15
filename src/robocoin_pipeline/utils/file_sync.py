@@ -392,7 +392,8 @@ def tar_build(
     local_path: Path,
     dataset_name: str,
     field_list: list[str],
-    episode_idx_list: list[int],
+    data_episode_list: list[int],
+    video_episode_list: list[int],
 ) -> None:
     """
     构建 tar 包。
@@ -401,19 +402,21 @@ def tar_build(
         local_path: 本地根目录
         dataset_name: 数据集名称
         field_list: 字段列表
-        episode_idx_list: episode 索引列表
+        data_episode_list: data 的 episode 索引列表
+        video_episode_list: video 的 episode 索引列表
 
     Returns:
         tar 映射字典 {field: {file_path: tar_name}}
 
-    只打包指定 episode_idx_list 中的文件，跳过已在 hardlink 中的文件。
+    只打包指定 episode 中的文件，跳过已在 hardlink 中的文件。
     """
     dataset_local = local_path / dataset_name
 
     if not dataset_local.exists():
         raise FileSyncError(f"数据集不存在: {dataset_local}") from None
 
-    episode_idx_set = set(episode_idx_list)
+    data_episode_set = set(data_episode_list)
+    video_episode_set = set(video_episode_list)
 
     for field in field_list:
         field_path: Path = dataset_local / field
@@ -440,7 +443,10 @@ def tar_build(
                 continue
 
             episode_idx = _extract_episode_idx(str(file_path))
-            if episode_idx is None or episode_idx not in episode_idx_set:
+            is_video = "videos/" in str(file_path) or "/videos/" in str(file_path)
+            episode_set = video_episode_set if is_video else data_episode_set
+
+            if episode_idx is None or episode_idx not in episode_set:
                 continue
 
             # 跳过已在 hardlink 中的文件
@@ -524,7 +530,8 @@ def push_files(
     nas_path: Path,
     dataset_name: str,
     field_list: list[str],
-    episode_idx_list: list[int],
+    data_episode_list: list[int],
+    video_episode_list: list[int],
 ) -> None:
     """
     构建并上传 tar 包到 NAS。
@@ -534,7 +541,8 @@ def push_files(
         nas_path: NAS 根目录
         dataset_name: 数据集名称
         field_list: 字段列表
-        episode_idx_list: episode 索引列表
+        data_episode_list: data 的 episode 索引列表
+        video_episode_list: video 的 episode 索引列表
     """
     dataset_local = local_path / dataset_name
     dataset_nas = nas_path / dataset_name
@@ -542,7 +550,9 @@ def push_files(
 
     # 构建 tar 包
     logger.info(f"开始构建 tar 包: {dataset_name}")
-    tar_build(local_path, dataset_name, field_list, episode_idx_list)
+    tar_build(
+        local_path, dataset_name, field_list, data_episode_list, video_episode_list
+    )
 
     # 上传 tar 包
     for field in field_list:
@@ -1526,96 +1536,111 @@ def _pull_hardlink_dependencies(
 
 
 if __name__ == "__main__":
-    # 测试内存管理功能
-    # 设置环境变量：启用自动清理，存储总限制为 1.2GB（可容纳约2个数据集）
-    os.environ["ROBOCOIN_AUTO_CLEANUP"] = "1"
-    os.environ["ROBOCOIN_STORAGE_LIMIT"] = str(int(1.2 * 1024**3))  # 1.2GB
+    # # 测试内存管理功能
+    # # 设置环境变量：启用自动清理，存储总限制为 1.2GB（可容纳约2个数据集）
+    # os.environ["ROBOCOIN_AUTO_CLEANUP"] = "1"
+    # os.environ["ROBOCOIN_STORAGE_LIMIT"] = str(int(1.2 * 1024**3))  # 1.2GB
 
-    logger.info("=" * 80)
-    logger.info("开始测试内存管理功能")
-    logger.info(f"存储总限制: {get_storage_limit() / 1024**3:.2f} GB")
-    logger.info(f"自动清理启用: {is_auto_cleanup_enabled()}")
-    logger.info("=" * 80)
+    # logger.info("=" * 80)
+    # logger.info("开始测试内存管理功能")
+    # logger.info(f"存储总限制: {get_storage_limit() / 1024**3:.2f} GB")
+    # logger.info(f"自动清理启用: {is_auto_cleanup_enabled()}")
+    # logger.info("=" * 80)
 
-    # 测试场景：
-    # 1. 先拉取 RMC-AIDA-L_box_up_down1（约 1.1GB）
-    # 2. 再拉取 RMC-AIDA-L_box_up_down2（会触发内存管理）
-    # 3. 再拉取 RMC-AIDA-L_box_up_down3（会触发内存管理，删除最老的数据集）
+    # # 测试场景：
+    # # 1. 先拉取 RMC-AIDA-L_box_up_down1（约 1.1GB）
+    # # 2. 再拉取 RMC-AIDA-L_box_up_down2（会触发内存管理）
+    # # 3. 再拉取 RMC-AIDA-L_box_up_down3（会触发内存管理，删除最老的数据集）
 
-    nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
-    local_path = Path("sync_files/test_memory")
+    # nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
+    # local_path = Path("sync_files/test_memory")
 
-    # 清空测试目录
-    if local_path.exists():
-        logger.info(f"清空测试目录: {local_path}")
-        shutil.rmtree(local_path)
-    local_path.mkdir(parents=True, exist_ok=True)
+    # # 清空测试目录
+    # if local_path.exists():
+    #     logger.info(f"清空测试目录: {local_path}")
+    #     shutil.rmtree(local_path)
+    # local_path.mkdir(parents=True, exist_ok=True)
 
+    # logger.info("\n" + "=" * 80)
+    # logger.info("第 1 步：拉取 RMC-AIDA-L_box_up_down1（所有 episode）")
+    # logger.info("=" * 80)
+    # pull_files(
+    #     nas_path=nas_path,
+    #     local_path=local_path,
+    #     dataset_name="RMC-AIDA-L_box_up_down1",
+    #     field_list=["merged"],
+    #     data_episode_list=list(range(200)),
+    #     video_episode_list=list(range(200)),
+    # )
+
+    # # 查看当前磁盘使用情况
+    # logger.info("\n当前数据集:")
+    # import subprocess
+
+    # result = subprocess.run(
+    #     ["du", "-sh"] + [str(p) for p in local_path.iterdir() if p.is_dir()],
+    #     capture_output=True,
+    #     text=True,
+    # )
+    # logger.info(result.stdout)
+
+    # logger.info("\n" + "=" * 80)
+    # logger.info("第 2 步：拉取 RMC-AIDA-L_box_up_down2（所有 episode）")
+    # logger.info("=" * 80)
+    # pull_files(
+    #     nas_path=nas_path,
+    #     local_path=local_path,
+    #     dataset_name="RMC-AIDA-L_box_up_down2",
+    #     field_list=["merged"],
+    #     data_episode_list=list(range(200)),
+    #     video_episode_list=list(range(200)),
+    # )
+
+    # # 查看当前磁盘使用情况
+    # logger.info("\n当前数据集:")
+    # result = subprocess.run(
+    #     ["du", "-sh"] + [str(p) for p in local_path.iterdir() if p.is_dir()],
+    #     capture_output=True,
+    #     text=True,
+    # )
+    # logger.info(result.stdout)
+
+    # logger.info("\n" + "=" * 80)
+    # logger.info("第 3 步：拉取 RMC-AIDA-L_box_up_down3（所有 episode，应触发删除）")
+    # logger.info("=" * 80)
+    # pull_files(
+    #     nas_path=nas_path,
+    #     local_path=local_path,
+    #     dataset_name="RMC-AIDA-L_box_up_down3",
+    #     field_list=["merged"],
+    #     data_episode_list=list(range(200)),
+    #     video_episode_list=list(range(200)),
+    # )
+
+    # # 查看最终磁盘使用情况
+    # logger.info("\n最终数据集:")
+    # result = subprocess.run(
+    #     ["du", "-sh"] + [str(p) for p in local_path.iterdir() if p.is_dir()],
+    #     capture_output=True,
+    #     text=True,
+    # )
+    # logger.info(result.stdout)
+
+    # logger.info("\n" + "=" * 80)
+    # logger.info("内存管理测试完成")
+    # logger.info("=" * 80)
+
+    # 测试push
     logger.info("\n" + "=" * 80)
-    logger.info("第 1 步：拉取 RMC-AIDA-L_box_up_down1（所有 episode）")
+    logger.info("测试 push_files 功能")
     logger.info("=" * 80)
-    pull_files(
+    local_path = Path("sync_files")
+    nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
+    push_files(
         nas_path=nas_path,
         local_path=local_path,
         dataset_name="RMC-AIDA-L_box_up_down1",
-        field_list=["merged"],
+        field_list=["format_convert", "merged", "motion_annotation"],
         data_episode_list=list(range(200)),
         video_episode_list=list(range(200)),
     )
-
-    # 查看当前磁盘使用情况
-    logger.info("\n当前数据集:")
-    import subprocess
-
-    result = subprocess.run(
-        ["du", "-sh"] + [str(p) for p in local_path.iterdir() if p.is_dir()],
-        capture_output=True,
-        text=True,
-    )
-    logger.info(result.stdout)
-
-    logger.info("\n" + "=" * 80)
-    logger.info("第 2 步：拉取 RMC-AIDA-L_box_up_down2（所有 episode）")
-    logger.info("=" * 80)
-    pull_files(
-        nas_path=nas_path,
-        local_path=local_path,
-        dataset_name="RMC-AIDA-L_box_up_down2",
-        field_list=["merged"],
-        data_episode_list=list(range(200)),
-        video_episode_list=list(range(200)),
-    )
-
-    # 查看当前磁盘使用情况
-    logger.info("\n当前数据集:")
-    result = subprocess.run(
-        ["du", "-sh"] + [str(p) for p in local_path.iterdir() if p.is_dir()],
-        capture_output=True,
-        text=True,
-    )
-    logger.info(result.stdout)
-
-    logger.info("\n" + "=" * 80)
-    logger.info("第 3 步：拉取 RMC-AIDA-L_box_up_down3（所有 episode，应触发删除）")
-    logger.info("=" * 80)
-    pull_files(
-        nas_path=nas_path,
-        local_path=local_path,
-        dataset_name="RMC-AIDA-L_box_up_down3",
-        field_list=["merged"],
-        data_episode_list=list(range(200)),
-        video_episode_list=list(range(200)),
-    )
-
-    # 查看最终磁盘使用情况
-    logger.info("\n最终数据集:")
-    result = subprocess.run(
-        ["du", "-sh"] + [str(p) for p in local_path.iterdir() if p.is_dir()],
-        capture_output=True,
-        text=True,
-    )
-    logger.info(result.stdout)
-
-    logger.info("\n" + "=" * 80)
-    logger.info("内存管理测试完成")
-    logger.info("=" * 80)
