@@ -242,3 +242,11 @@ todo :
 - raw_data的处理
 - 添加episode_list 和 video_list
 - 拉取hardlink源文件的时同样要做file_hash的检测，local_file_hash->file_hash->exist?->same_hash?
+
+---
+
+我不希望出现的：
+
+1. 每次push生成许多重复的tar包
+2. 有一点小的更新都要更新所有tar包
+3. tar包大小超限

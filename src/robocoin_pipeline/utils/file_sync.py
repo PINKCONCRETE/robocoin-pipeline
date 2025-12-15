@@ -652,17 +652,16 @@ def pull_files(
     # 存储每个字段需要拉取的文件（用于依赖字段，只拉取被引用的文件）
     field_required_files = {}
 
-    # 存储依赖字段中已存在的文件（用于保护，避免删除）
-    # 格式: {dependent_field: set(file_paths)}
+    # 存储所有字段中已存在的文件（用于保护，避免删除）
+    # 格式: {field: set(file_paths)}
     field_existing_files = {}
 
-    # 预先扫描依赖字段，收集已存在的文件
-    dependent_fields = set(all_fields_to_pull) - set(field_list)
-    for dep_field in dependent_fields:
-        dep_field_local = dataset_local / dep_field
-        if dep_field_local.exists():
+    # 预先扫描所有字段，收集已存在的文件
+    for field_to_scan in all_fields_to_pull:
+        field_local_scan = dataset_local / field_to_scan
+        if field_local_scan.exists():
             existing_files = set()
-            for file_path in dep_field_local.rglob("*"):
+            for file_path in field_local_scan.rglob("*"):
                 if file_path.is_file():
                     # 跳过元数据文件
                     if file_path.name in [
@@ -672,12 +671,12 @@ def pull_files(
                         "local_file_hash.json",
                     ]:
                         continue
-                    file_rel_path = str(file_path.relative_to(dep_field_local))
+                    file_rel_path = str(file_path.relative_to(field_local_scan))
                     existing_files.add(file_rel_path)
             if existing_files:
-                field_existing_files[dep_field] = existing_files
+                field_existing_files[field_to_scan] = existing_files
                 logger.info(
-                    f"  依赖字段 {dep_field} 已有 {len(existing_files)} 个文件，将保护不删除"
+                    f"  字段 {field_to_scan} 已有 {len(existing_files)} 个文件，将保护不删除"
                 )
 
     # 2. 拉取所有字段的文件
@@ -894,11 +893,8 @@ def pull_files(
             tar_local_path.unlink()
 
         # 6. 删除不需要的文件
-        # 主字段：可以删除所有不需要的文件
-        # 依赖字段：
-        #   - 已存在的文件（在 field_existing_files 中）：保护，不删除
-        #   - link 文件：可以删除并重建
-        #   - 新下载但不需要的文件：可以删除
+        # 对所有字段（主字段和依赖字段）都保护已存在的文件，实现增量更新
+        # 只删除本次新下载但不需要的文件
         for file_path in field_local.rglob("*"):
             if not file_path.is_file():
                 continue
@@ -918,34 +914,25 @@ def pull_files(
             # 检查是否应该删除
             should_delete = False
 
-            if is_primary_field:
-                # 主字段：删除所有不需要的文件
-                if (
-                    file_rel_path_str not in needed_files
-                    and file_rel_path_str not in hardlinked_links
-                ):
+            # 检查是否是已存在的文件
+            is_existing = (
+                field in field_existing_files
+                and file_rel_path_str in field_existing_files[field]
+            )
+
+            if is_existing:
+                # 已存在的文件，保护不删除（增量更新）
+                should_delete = False
+            elif file_rel_path_str in hardlinked_links:
+                # link 文件可以删除并重建
+                if file_rel_path_str not in needed_files:
+                    should_delete = True
+                    reason = "不需要的 link 文件"
+            else:
+                # 新下载的文件，如果不需要则删除
+                if file_rel_path_str not in needed_files:
                     should_delete = True
                     reason = "不需要的文件"
-            else:
-                # 依赖字段
-                is_existing = (
-                    field in field_existing_files
-                    and file_rel_path_str in field_existing_files[field]
-                )
-
-                if is_existing:
-                    # 已存在的文件，保护不删除（增量更新）
-                    should_delete = False
-                elif file_rel_path_str in hardlinked_links:
-                    # link 文件可以删除并重建
-                    if file_rel_path_str not in needed_files:
-                        should_delete = True
-                        reason = "不需要的 link 文件"
-                else:
-                    # 新下载的文件，如果不需要则删除
-                    if file_rel_path_str not in needed_files:
-                        should_delete = True
-                        reason = "不需要的文件"
 
             if should_delete:
                 logger.debug(f"  删除{reason}: {file_rel_path}")
@@ -1314,18 +1301,26 @@ def _pull_hardlink_dependencies(
 if __name__ == "__main__":
     # 测试 pull_files
     pull_files(
-        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline"),
-        local_path=Path("sync_files"),
-        dataset_name="RMC-AIDA-L_box_up_down",
+        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets"),
+        local_path=Path("sync_files/local"),
+        dataset_name="RMC-AIDA-L_box_up_down1",
         field_list=["merged", "motion_annotation"],
         data_episode_list=list(range(0, 5)),
         video_episode_list=list(range(0, 3)),
     )
     pull_files(
-        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline"),
-        local_path=Path("sync_files"),
-        dataset_name="RMC-AIDA-L_box_up_down",
+        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets"),
+        local_path=Path("sync_files/local"),
+        dataset_name="RMC-AIDA-L_box_up_down1",
         field_list=["motion_annotation"],
+        data_episode_list=list(range(10, 15)),
+        video_episode_list=list(range(5, 9)),
+    )
+    pull_files(
+        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets"),
+        local_path=Path("sync_files/local"),
+        dataset_name="RMC-AIDA-L_box_up_down1",
+        field_list=["merged"],
         data_episode_list=list(range(10, 15)),
         video_episode_list=list(range(5, 9)),
     )
@@ -1334,7 +1329,7 @@ if __name__ == "__main__":
     # push_files(
     #     local_path=Path("sync_files"),
     #     nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets"),
-    #     dataset_name="RMC-AIDA-L_box_up_down",
+    #     dataset_name="RMC-AIDA-L_box_up_down1",
     #     field_list=["format_convert", "merged", "motion_annotation"],
     #     episode_idx_list=list(range(0, 200)),
     # )

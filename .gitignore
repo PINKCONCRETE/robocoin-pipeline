@@ -20,7 +20,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+RMC-AIDA*
 # Virtual Environments
 venv/
 ENV/
