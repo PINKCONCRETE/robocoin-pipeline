@@ -20,7 +20,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+RMC-AIDA*
 # Virtual Environments
 venv/
 ENV/
@@ -57,3 +57,5 @@ dask-scheduler-state.json
 .env
 config.toml
 *.log
+
+sync_files/*
