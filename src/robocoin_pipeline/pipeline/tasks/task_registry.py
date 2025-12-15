@@ -1,5 +1,6 @@
 import functools
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 
 from prefect import get_run_logger
@@ -14,10 +15,20 @@ from robocoin_pipeline.utils.dataset_info import (
 from robocoin_pipeline.utils.file_sync import sync_in, sync_out
 
 _TASK_REGISTRY: dict[str, dict[str, any]] = {}
+_FUNC = "func"
+
+
+class TaskConfigTypeEnum(str, Enum):
+    CONFIG_DICT = "config_dict"
+    CONFIG_PATH = "config_path"
+
+
+_CONFIG_TYPE = "config_type"
 
 
 def register_multi_input_fields_task(
     name: str | None = None,
+    config_type: TaskConfigTypeEnum = TaskConfigTypeEnum.CONFIG_DICT,
 ) -> Callable:
     """
     装饰器：注册 RoboCoin Pipeline 任务
@@ -37,6 +48,7 @@ def register_multi_input_fields_task(
             repo_path: str | Path,
             input_fields: dict[str, str],
             output_field: str,
+            **kwargs: any,
         ) -> None:
             logger = get_run_logger()
             repo_path = Path(repo_path)
@@ -70,6 +82,7 @@ def register_multi_input_fields_task(
                     repo_path=repo_path,
                     input_fields=input_fields,
                     output_field=output_field,
+                    **kwargs,
                 )
             except Exception as e:
                 logger.error(f"Task {registered_name} failed: {e}")
@@ -80,7 +93,8 @@ def register_multi_input_fields_task(
 
         # 注册（此时不加载资源，只存函数）
         _TASK_REGISTRY[registered_name] = {
-            "func": wrapped_task,
+            _FUNC: wrapped_task,
+            _CONFIG_TYPE: config_type,
             # 注意：不再存 ncpu/nmem/ngpu，因为它们是 per-repo 动态的
         }
 
@@ -91,6 +105,7 @@ def register_multi_input_fields_task(
 
 def register_single_input_field_task(
     name: str | None = None,
+    config_type: TaskConfigTypeEnum = TaskConfigTypeEnum.CONFIG_DICT,
 ) -> Callable:
     """
     装饰器：注册 RoboCoin Pipeline 任务
@@ -110,6 +125,7 @@ def register_single_input_field_task(
             repo_path: str | Path,
             input_field: str,
             output_field: str,
+            **kwargs: any,
         ) -> None:
             logger = get_run_logger()
             repo_path = Path(repo_path)
@@ -143,6 +159,7 @@ def register_single_input_field_task(
                     repo_path=repo_path,
                     input_field=input_field,
                     output_field=output_field,
+                    **kwargs,
                 )
             except Exception as e:
                 logger.error(f"Task {registered_name} failed: {e}")
@@ -153,8 +170,8 @@ def register_single_input_field_task(
 
         # 注册（此时不加载资源，只存函数）
         _TASK_REGISTRY[registered_name] = {
-            "func": wrapped_task,
-            # 注意：不再存 ncpu/nmem/ngpu，因为它们是 per-repo 动态的
+            _FUNC: wrapped_task,
+            _CONFIG_TYPE: config_type,
         }
 
         return wrapped_task

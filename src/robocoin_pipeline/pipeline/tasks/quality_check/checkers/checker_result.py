@@ -23,3 +23,7 @@ class CheckerResult:
             results["warnings"] = result.warnings
         if result.score is not None:
             results["score"] = result.score
+
+    def is_empty(self) -> bool:
+        """判断该 CheckerResult 是否为空（所有字段均为 None）"""
+        return self.errors is None and self.warnings is None and self.score is None
