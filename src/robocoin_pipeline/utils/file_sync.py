@@ -298,22 +298,26 @@ def tar_pull(
     dataset_local = local_path / dataset_name
     dataset_local.mkdir(parents=True, exist_ok=True)
 
-    # 1. 拉取 file_tar.json
-    tar_json_nas = dataset_nas / TAR_FILE_NAME
-    tar_json_local = dataset_local / TAR_FILE_NAME
-
-    if not tar_json_nas.exists():
-        raise FileSyncError(f"NAS 上不存在 {TAR_FILE_NAME}: {tar_json_nas}") from None
-
-    shutil.copy2(tar_json_nas, tar_json_local)
-    tar_mapping = load_json_file(tar_json_local)
-
-    # 2. 计算需要下载的 tar 包和所需空间
+    # 1. 拉取各个 field 的 file_tar.json 并计算需要下载的 tar 包
     required_tars = set()
     episode_idx_set = set(episode_idx_list)
 
     for field in field_list:
-        for file_path, tar_name in tar_mapping.get(field, {}).items():
+        field_nas = dataset_nas / field
+        field_local = dataset_local / field
+        field_local.mkdir(parents=True, exist_ok=True)
+
+        tar_json_nas = field_nas / TAR_FILE_NAME
+        tar_json_local = field_local / TAR_FILE_NAME
+
+        if not tar_json_nas.exists():
+            logger.warning(f"NAS 上不存在 {TAR_FILE_NAME}: {tar_json_nas}")
+            continue
+
+        shutil.copy2(tar_json_nas, tar_json_local)
+        tar_mapping = load_json_file(tar_json_local)
+
+        for file_path, tar_name in tar_mapping.items():
             # 解析 episode 索引
             episode_idx = _extract_episode_idx(file_path)
             if episode_idx is not None and episode_idx in episode_idx_set:
@@ -501,7 +505,7 @@ def file_hash_build(
         save_json_file(hash_mapping, hash_json_path)
 
 
-def file_push(
+def push_files(
     local_path: Path,
     nas_path: Path,
     dataset_name: str,
@@ -614,7 +618,8 @@ def pull_files(
     local_path: Path,
     dataset_name: str,
     field_list: list[str],
-    episode_idx_list: list[int],
+    data_episode_list: list[int],
+    video_episode_list: list[int],
 ) -> None:
     """
     拉取原始文件（增量更新）。
@@ -624,99 +629,383 @@ def pull_files(
         local_path: 本地根目录
         dataset_name: 数据集名称
         field_list: 字段列表
-        episode_idx_list: episode 索引列表
+        data_episode_list: data 的 episode 索引列表
+        video_episode_list: video 的 episode 索引列表
     """
     dataset_nas = nas_path / dataset_name
     dataset_local = local_path / dataset_name
     dataset_local.mkdir(parents=True, exist_ok=True)
 
-    episode_idx_set = set(episode_idx_list)
+    data_episode_set = set(data_episode_list)
+    video_episode_set = set(video_episode_list)
 
-    for field in field_list:
+    # 1. 收集所有需要拉取的字段（包括依赖字段）
+    all_fields_to_pull = _collect_dependent_fields(
+        dataset_nas, field_list, data_episode_set, video_episode_set
+    )
+
+    logger.info(f"总共需要拉取 {len(all_fields_to_pull)} 个字段: {all_fields_to_pull}")
+
+    # 存储所有字段的 hardlink_mappings，用于最后统一重建
+    all_hardlink_mappings = {}
+
+    # 存储每个字段需要拉取的文件（用于依赖字段，只拉取被引用的文件）
+    field_required_files = {}
+
+    # 存储依赖字段中已存在的文件（用于保护，避免删除）
+    # 格式: {dependent_field: set(file_paths)}
+    field_existing_files = {}
+
+    # 预先扫描依赖字段，收集已存在的文件
+    dependent_fields = set(all_fields_to_pull) - set(field_list)
+    for dep_field in dependent_fields:
+        dep_field_local = dataset_local / dep_field
+        if dep_field_local.exists():
+            existing_files = set()
+            for file_path in dep_field_local.rglob("*"):
+                if file_path.is_file():
+                    # 跳过元数据文件
+                    if file_path.name in [
+                        HARDLINK_MAPPING_NAME,
+                        TAR_FILE_NAME,
+                        HASH_FILE_NAME,
+                        "local_file_hash.json",
+                    ]:
+                        continue
+                    file_rel_path = str(file_path.relative_to(dep_field_local))
+                    existing_files.add(file_rel_path)
+            if existing_files:
+                field_existing_files[dep_field] = existing_files
+                logger.info(
+                    f"  依赖字段 {dep_field} 已有 {len(existing_files)} 个文件，将保护不删除"
+                )
+
+    # 2. 拉取所有字段的文件
+    for field in all_fields_to_pull:
         logger.info(f"处理字段: {field}")
 
         field_nas = dataset_nas / field
         field_local = dataset_local / field
         field_local.mkdir(parents=True, exist_ok=True)
 
+        # 检查这是否是用户直接请求的字段还是依赖字段
+        is_primary_field = field in field_list
+
         # 1. 拉取 hardlink_mappings.json
         hardlink_nas = field_nas / HARDLINK_MAPPING_NAME
         hardlink_local = field_local / HARDLINK_MAPPING_NAME
+        hardlink_mappings = {}
 
         if hardlink_nas.exists():
             shutil.copy2(hardlink_nas, hardlink_local)
             hardlink_mappings = load_json_file(hardlink_local)
+            all_hardlink_mappings[field] = hardlink_mappings
+            logger.info("  拉取 hardlink_mappings.json")
 
-            # 2. 递归拉取依赖的字段（沿着 hardlink 链）
-            _pull_hardlink_dependencies(
-                nas_path,
-                local_path,
-                dataset_name,
-                field,
-                hardlink_mappings,
-                episode_idx_set,
-            )
+            # 如果这是主字段，收集它依赖的其他字段的文件
+            if is_primary_field:
+                for link_path, target_path in hardlink_mappings.items():
+                    # 只处理属于当前 field 的链接
+                    if not link_path.startswith(field + "/"):
+                        continue
 
-        # 3. 备份本地 file_hash.json
+                    # 检查 episode 过滤
+                    episode_idx = _extract_episode_idx(target_path)
+                    is_video = "videos/" in target_path or "/videos/" in target_path
+                    episode_set = video_episode_set if is_video else data_episode_set
+
+                    if episode_idx is not None and episode_idx not in episode_set:
+                        continue
+
+                    # target_path 格式: "field_name/path/to/file"
+                    target_parts = Path(target_path).parts
+                    if target_parts:
+                        target_field = target_parts[0]
+                        if target_field != field:
+                            # 这是跨字段的硬链接，记录需要拉取的文件
+                            if target_field not in field_required_files:
+                                field_required_files[target_field] = set()
+                            # 去掉 field 前缀，只保留相对路径
+                            target_rel_path = "/".join(target_parts[1:])
+                            field_required_files[target_field].add(target_rel_path)
+
+        # 2. 拉取 file_tar.json
+        tar_json_nas = field_nas / TAR_FILE_NAME
+        tar_json_local = field_local / TAR_FILE_NAME
+        tar_mapping = {}
+
+        if tar_json_nas.exists():
+            shutil.copy2(tar_json_nas, tar_json_local)
+            tar_mapping = load_json_file(tar_json_local)
+            logger.info("  拉取 file_tar.json")
+
+        # 3. 拉取 file_hash.json
+        hash_nas = field_nas / HASH_FILE_NAME
         hash_local = field_local / HASH_FILE_NAME
-        hash_local_backup = field_local / f"local_{HASH_FILE_NAME}"
+        hash_local_backup = field_local / "local_file_hash.json"
 
+        # 备份本地 file_hash.json
+        local_hashes = {}
         if hash_local.exists():
             shutil.copy2(hash_local, hash_local_backup)
-            local_hashes = load_json_file(hash_local_backup)
-        else:
-            local_hashes = {}
+            local_hashes_raw = load_json_file(hash_local_backup)
+            # file_hash.json 的 key 包含 field 前缀，需要去掉
+            for file_path, file_hash in local_hashes_raw.items():
+                if file_path.startswith(field + "/"):
+                    rel_path = file_path[len(field) + 1 :]
+                    local_hashes[rel_path] = file_hash
 
-        # 4. 拉取 NAS 上的 file_hash.json
-        hash_nas = field_nas / HASH_FILE_NAME
+        # 下载云端 file_hash.json
+        remote_hashes = {}
         if hash_nas.exists():
             shutil.copy2(hash_nas, hash_local)
-            remote_hashes = load_json_file(hash_local)
-        else:
-            logger.warning(f"NAS 上不存在 {HASH_FILE_NAME}: {hash_nas}")
-            remote_hashes = {}
+            remote_hashes_raw = load_json_file(hash_local)
+            # file_hash.json 的 key 包含 field 前缀，需要去掉
+            for file_path, file_hash in remote_hashes_raw.items():
+                if file_path.startswith(field + "/"):
+                    rel_path = file_path[len(field) + 1 :]
+                    remote_hashes[rel_path] = file_hash
+            logger.info("  拉取 file_hash.json")
 
-        # 5. 对比并删除差集
-        local_files = set(local_hashes.keys())
-        remote_files = set(remote_hashes.keys())
-        files_to_delete = local_files - remote_files
+        # 获取所有 hardlink 的链接文件路径（相对于 field）
+        # hardlink_mappings 格式: {link_path: target_path}，路径都是完整路径（field/...）
+        hardlinked_links = set()
+        hardlinked_targets = set()
+        for link_path, target_path in hardlink_mappings.items():
+            # link_path 和 target_path 是完整路径（field/...）
+            # 转换为相对于 field 的路径
+            if link_path.startswith(field + "/"):
+                hardlinked_links.add(link_path[len(field) + 1 :])
+            if target_path.startswith(field + "/"):
+                hardlinked_targets.add(target_path[len(field) + 1 :])
 
-        for file_rel_path in files_to_delete:
-            file_local = field_local / file_rel_path
-            if file_local.exists():
-                logger.info(f"删除多余文件: {file_rel_path}")
-                file_local.unlink()
+        # 4. 计算需要下载的 tar 包（基于 hash 检查）
+        required_tars = set()
+        needed_files = set()
+        files_need_update = set()  # 需要更新的文件（本地不存在或 hash 不匹配）
 
-        # 6. 拉取本地不存在或哈希不匹配的文件
-        for file_rel_path, remote_hash in remote_hashes.items():
-            episode_idx = _extract_episode_idx(file_rel_path)
-            if episode_idx is not None and episode_idx not in episode_idx_set:
-                continue
+        # 如果是依赖字段，只处理被引用的文件
+        if not is_primary_field and field in field_required_files:
+            logger.info(
+                f"  依赖字段，只拉取被引用的 {len(field_required_files[field])} 个文件"
+            )
 
-            file_local = field_local / file_rel_path
-            file_nas = field_nas / file_rel_path
+            for file_rel_path in field_required_files[field]:
+                needed_files.add(file_rel_path)
 
-            # 检查是否需要下载
-            need_download = False
-            if not file_local.exists():
-                need_download = True
-            else:
+                # 检查文件是否需要更新（基于 hash）
+                file_local_path = field_local / file_rel_path
+                remote_hash = remote_hashes.get(file_rel_path)
                 local_hash = local_hashes.get(file_rel_path)
-                if local_hash != remote_hash:
-                    need_download = True
 
-            if need_download:
-                if not file_nas.exists():
-                    logger.warning(f"NAS 上文件不存在: {file_nas}")
+                # 如果本地文件不存在，或者 hash 不匹配，需要更新
+                if not file_local_path.exists() or local_hash != remote_hash:
+                    files_need_update.add(file_rel_path)
+                    # 查找该文件对应的 tar 包
+                    file_path_with_field = field + "/" + file_rel_path
+                    if file_path_with_field in tar_mapping:
+                        required_tars.add(tar_mapping[file_path_with_field])
+        else:
+            # 主字段，拉取所有需要的文件
+            for file_path_with_field, tar_name in tar_mapping.items():
+                # file_path_with_field 格式: "field/path/to/file"
+                # 去掉 field 前缀
+                if not file_path_with_field.startswith(field + "/"):
                     continue
 
-                logger.info(f"下载文件: {file_rel_path}")
-                file_local.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file_nas, file_local)
+                file_rel_path = file_path_with_field[len(field) + 1 :]
+
+                # 检查是否需要这个文件
+                episode_idx = _extract_episode_idx(file_rel_path)
+                is_video = "videos/" in file_rel_path or "/videos/" in file_rel_path
+                episode_set = video_episode_set if is_video else data_episode_set
+
+                # 过滤 episode
+                if episode_idx is not None and episode_idx not in episode_set:
+                    continue
+
+                # 如果是 hardlink 的 link 文件，跳过（不需要下载，后面会重建）
+                if file_rel_path in hardlinked_links:
+                    continue
+
+                # 记录需要的文件
+                needed_files.add(file_rel_path)
+
+                # 检查文件是否需要更新（基于 hash）
+                file_local_path = field_local / file_rel_path
+                remote_hash = remote_hashes.get(file_rel_path)
+                local_hash = local_hashes.get(file_rel_path)
+
+                # 如果本地文件不存在，或者 hash 不匹配，需要更新
+                if not file_local_path.exists() or local_hash != remote_hash:
+                    files_need_update.add(file_rel_path)
+                    required_tars.add(tar_name)
+
+            # 添加所有 hardlink 的 target 文件（仅主字段）
+            for target_rel_path in hardlinked_targets:
+                episode_idx = _extract_episode_idx(target_rel_path)
+                is_video = "videos/" in target_rel_path or "/videos/" in target_rel_path
+                episode_set = video_episode_set if is_video else data_episode_set
+
+                if episode_idx is not None and episode_idx not in episode_set:
+                    continue
+
+                needed_files.add(target_rel_path)
+
+                # 检查 target 文件是否需要更新
+                file_local_path = field_local / target_rel_path
+                remote_hash = remote_hashes.get(target_rel_path)
+                local_hash = local_hashes.get(target_rel_path)
+
+                if not file_local_path.exists() or local_hash != remote_hash:
+                    files_need_update.add(target_rel_path)
+                    # 查找该文件对应的 tar 包
+                    file_path_with_field = field + "/" + target_rel_path
+                    if file_path_with_field in tar_mapping:
+                        required_tars.add(tar_mapping[file_path_with_field])
+
+        logger.info(
+            f"  需要更新 {len(files_need_update)} 个文件，下载 {len(required_tars)} 个 tar 包"
+        )
+
+        # 5. 下载并解压 tar 包
+        for tar_name in required_tars:
+            tar_nas_path = field_nas / tar_name
+            tar_local_path = field_local / tar_name
+
+            if not tar_nas_path.exists():
+                logger.warning(f"  tar 包不存在: {tar_name}")
+                continue
+
+            # 下载 tar 包
+            logger.info(f"  下载 tar 包: {tar_name}")
+            shutil.copy2(tar_nas_path, tar_local_path)
+
+            # 解压 tar 包
+            logger.info(f"  解压 tar 包: {tar_name}")
+            try:
+                with tarfile.open(tar_local_path, "r") as tar:
+                    tar.extractall(path=field_local)
+            except Exception as e:
+                logger.error(f"  解压失败 {tar_name}: {e}")
+                raise FileSyncError(f"解压失败: {e}") from e
+
+            # 删除 tar 包
+            tar_local_path.unlink()
+
+        # 6. 删除不需要的文件
+        # 主字段：可以删除所有不需要的文件
+        # 依赖字段：
+        #   - 已存在的文件（在 field_existing_files 中）：保护，不删除
+        #   - link 文件：可以删除并重建
+        #   - 新下载但不需要的文件：可以删除
+        for file_path in field_local.rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            # 跳过元数据文件
+            if file_path.name in [
+                HARDLINK_MAPPING_NAME,
+                TAR_FILE_NAME,
+                HASH_FILE_NAME,
+                "local_file_hash.json",
+            ]:
+                continue
+
+            file_rel_path = file_path.relative_to(field_local)
+            file_rel_path_str = str(file_rel_path)
+
+            # 检查是否应该删除
+            should_delete = False
+
+            if is_primary_field:
+                # 主字段：删除所有不需要的文件
+                if (
+                    file_rel_path_str not in needed_files
+                    and file_rel_path_str not in hardlinked_links
+                ):
+                    should_delete = True
+                    reason = "不需要的文件"
+            else:
+                # 依赖字段
+                is_existing = (
+                    field in field_existing_files
+                    and file_rel_path_str in field_existing_files[field]
+                )
+
+                if is_existing:
+                    # 已存在的文件，保护不删除（增量更新）
+                    should_delete = False
+                elif file_rel_path_str in hardlinked_links:
+                    # link 文件可以删除并重建
+                    if file_rel_path_str not in needed_files:
+                        should_delete = True
+                        reason = "不需要的 link 文件"
+                else:
+                    # 新下载的文件，如果不需要则删除
+                    if file_rel_path_str not in needed_files:
+                        should_delete = True
+                        reason = "不需要的文件"
+
+            if should_delete:
+                logger.debug(f"  删除{reason}: {file_rel_path}")
+                file_path.unlink()
 
         # 清理备份
         if hash_local_backup.exists():
             hash_local_backup.unlink()
+
+    # 3. 统一重建所有硬链接
+    logger.info("开始重建硬链接...")
+    total_hardlinks_created = 0
+
+    for field, hardlink_mappings in all_hardlink_mappings.items():
+        if not hardlink_mappings:
+            continue
+
+        logger.info(f"  处理字段 {field} 的硬链接...")
+        hardlinks_created = 0
+
+        for link_path, target_path in hardlink_mappings.items():
+            # link_path 和 target_path 都是完整路径（field/...）
+            link_full_path = dataset_local / link_path
+            target_full_path = dataset_local / target_path
+
+            # 只重建属于当前 field 的链接
+            if not link_path.startswith(field + "/"):
+                continue
+
+            # 过滤 episode
+            episode_idx = _extract_episode_idx(target_path)
+            is_video = "videos/" in target_path or "/videos/" in target_path
+            episode_set = video_episode_set if is_video else data_episode_set
+
+            if episode_idx is not None and episode_idx not in episode_set:
+                continue
+
+            if not target_full_path.exists():
+                logger.warning(f"    目标文件不存在，跳过: {target_path}")
+                continue
+
+            # 删除已存在的链接
+            if link_full_path.exists():
+                link_full_path.unlink()
+
+            # 创建硬链接
+            link_full_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(target_full_path, link_full_path)
+                logger.debug(f"    创建硬链接: {link_path} -> {target_path}")
+                hardlinks_created += 1
+            except Exception as e:
+                logger.error(f"    创建硬链接失败 {link_path}: {e}")
+
+        if hardlinks_created > 0:
+            logger.info(f"  字段 {field} 创建了 {hardlinks_created} 个硬链接")
+            total_hardlinks_created += hardlinks_created
+
+    if total_hardlinks_created > 0:
+        logger.info(f"总共创建了 {total_hardlinks_created} 个硬链接")
 
     # 更新时间戳
     update_timestamp(dataset_local)
@@ -773,6 +1062,77 @@ def rebuild_hardlink(
 # ============================================================================
 # 辅助函数
 # ============================================================================
+
+
+def _collect_dependent_fields(
+    dataset_nas: Path,
+    initial_fields: list[str],
+    data_episode_set: set[int],
+    video_episode_set: set[int],
+) -> list[str]:
+    """
+    递归收集所有需要拉取的字段（包括硬链接依赖的字段）。
+
+    Args:
+        dataset_nas: NAS 数据集路径
+        initial_fields: 初始字段列表
+        data_episode_set: data 的 episode 集合
+        video_episode_set: video 的 episode 集合
+
+    Returns:
+        所有需要拉取的字段列表（去重后）
+    """
+    visited_fields = set()
+    fields_to_process = list(initial_fields)
+    result_fields = []
+
+    while fields_to_process:
+        field = fields_to_process.pop(0)
+
+        if field in visited_fields:
+            continue
+
+        visited_fields.add(field)
+        result_fields.append(field)
+
+        # 检查该字段是否有 hardlink_mappings.json
+        hardlink_nas = dataset_nas / field / HARDLINK_MAPPING_NAME
+        if not hardlink_nas.exists():
+            continue
+
+        # 加载 hardlink 映射
+        hardlink_mappings = load_json_file(hardlink_nas)
+
+        # 找出该字段依赖的其他字段
+        dependent_fields = set()
+        for link_path, target_path in hardlink_mappings.items():
+            # 只处理属于当前 field 的链接
+            if not link_path.startswith(field + "/"):
+                continue
+
+            # 检查 episode 过滤
+            episode_idx = _extract_episode_idx(target_path)
+            is_video = "videos/" in target_path or "/videos/" in target_path
+            episode_set = video_episode_set if is_video else data_episode_set
+
+            if episode_idx is not None and episode_idx not in episode_set:
+                continue
+
+            # target_path 格式: "field_name/path/to/file"
+            # 提取字段名
+            target_parts = Path(target_path).parts
+            if target_parts and target_parts[0] != field:
+                dependent_field = target_parts[0]
+                if dependent_field not in visited_fields:
+                    dependent_fields.add(dependent_field)
+
+        # 将依赖字段加入处理队列
+        for dep_field in dependent_fields:
+            if dep_field not in visited_fields:
+                fields_to_process.append(dep_field)
+                logger.info(f"  发现依赖字段: {field} -> {dep_field}")
+
+    return result_fields
 
 
 def _extract_episode_idx(file_path: str) -> Optional[int]:
@@ -952,11 +1312,29 @@ def _pull_hardlink_dependencies(
 
 
 if __name__ == "__main__":
-    file_push(
-        local_path=Path("sync_files"),
+    # 测试 pull_files
+    pull_files(
         nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline"),
+        local_path=Path("sync_files"),
         dataset_name="RMC-AIDA-L_box_up_down",
-        field_list=["merged", "format_convert", "motion_annotation"],
-        episode_idx_list=list(range(0, 200)),
+        field_list=["merged", "motion_annotation"],
+        data_episode_list=list(range(0, 5)),
+        video_episode_list=list(range(0, 3)),
     )
-    pass
+    pull_files(
+        nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline"),
+        local_path=Path("sync_files"),
+        dataset_name="RMC-AIDA-L_box_up_down",
+        field_list=["motion_annotation"],
+        data_episode_list=list(range(10, 15)),
+        video_episode_list=list(range(5, 9)),
+    )
+
+    # 测试 push_files
+    # push_files(
+    #     local_path=Path("sync_files"),
+    #     nas_path=Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets"),
+    #     dataset_name="RMC-AIDA-L_box_up_down",
+    #     field_list=["format_convert", "merged", "motion_annotation"],
+    #     episode_idx_list=list(range(0, 200)),
+    # )

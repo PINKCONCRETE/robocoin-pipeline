@@ -236,3 +236,9 @@ pull的时候要检查剩余的buffer大小和~~数据集大小~~将要下载的
 如果不够，则尝试先将最老的dataset删除。
 
 pull和push都要更新dataset下的update_time.json中的时间戳，这样才方便查找删除哪个
+
+todo :
+
+- raw_data的处理
+- 添加episode_list 和 video_list
+- 拉取hardlink源文件的时同样要做file_hash的检测，local_file_hash->file_hash->exist?->same_hash?
