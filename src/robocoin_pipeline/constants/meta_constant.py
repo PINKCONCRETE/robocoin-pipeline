@@ -1,0 +1,11 @@
+EPISODE_NUM = "episode_num"
+FRAME_NUM = "frame_num"
+TASK_INDEX = "task_index"
+EPISODE_INDEX = "episode_index"
+FEATURE_NAMES = "feature_names"
+FEATURE_SHAPES = "feature_shapes"
+
+VIDEO_CODEC = "video_codec"
+VIDEO_WIDTH = "video_width"
+VIDEO_HEIGHT = "video_height"
+VIDEO_FPS = "video_fps"

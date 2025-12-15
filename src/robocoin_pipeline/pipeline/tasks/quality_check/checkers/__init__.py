@@ -1,3 +1,3 @@
-from . import format_checkers
+from . import repo_format_checkers
 
-__all__ = ["format_checkers"]
+__all__ = ["repo_format_checkers"]

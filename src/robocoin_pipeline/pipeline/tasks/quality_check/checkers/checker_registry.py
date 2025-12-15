@@ -2,12 +2,13 @@ import functools
 from collections import defaultdict
 from collections.abc import Callable
 
+from robocoin_pipeline.constants.config_constant import (
+    LEROBOT_VERSION_V21,
+)
+
 
 # ====== 通用注册表工厂 ======
-def create_checker_registry() -> dict[str, dict]:
-    """
-    创建一个嵌套注册表：{version: {name: func}}
-    """
+def create_checker_registry() -> dict[str, Callable]:
     return defaultdict(dict)
 
 
@@ -25,7 +26,7 @@ def make_register_decorator(
     """
 
     def register_checker(
-        name: str | None = None, lerobot_format_version: str = "v21"
+        name: str | None = None, lerobot_format_version: str = LEROBOT_VERSION_V21
     ) -> Callable:
         def decorator(func: Callable) -> Callable:
             nonlocal name
@@ -52,39 +53,59 @@ def make_register_decorator(
 
 
 # ====== 具体注册器实例 ======
-_FORMAT_CHECKER_REGISTRY = create_checker_registry()
-register_format_checker = make_register_decorator(
-    _FORMAT_CHECKER_REGISTRY, "register_format_checker"
+# 数据集元信息检查器
+_REPO_FORMAT_CHECKER_REGISTRY = create_checker_registry()
+register_repo_format_checker = make_register_decorator(
+    _REPO_FORMAT_CHECKER_REGISTRY, "register_repo_format_checker"
 )
 
+# 异常Episode长度检查器
 _ABNORMAL_EPISODE_LENGTH_CHECKER_REGISTRY = create_checker_registry()
 register_abnormal_episode_length_checker = make_register_decorator(
     _ABNORMAL_EPISODE_LENGTH_CHECKER_REGISTRY,
     "register_abnormal_episode_length_checker",
 )
 
-_DATA_CHECKER_REGISTRY = create_checker_registry()
-register_data_checker = make_register_decorator(
-    _DATA_CHECKER_REGISTRY, "register_data_checker"
+# 数据文件Meta信息检查器
+_DATA_META_CHECKER_REGISTRY = create_checker_registry()
+register_data_meta_checker = make_register_decorator(
+    _DATA_META_CHECKER_REGISTRY, "register_data_meta_checker"
 )
 
-_VIDEO_CHECKER_REGISTRY = create_checker_registry()
-register_video_checker = make_register_decorator(
-    _VIDEO_CHECKER_REGISTRY, "register_video_checker"
+# 数据质量检查器
+_DATA_QUALITY_CHECKER_REGISTRY = create_checker_registry()
+register_data_quality_checker = make_register_decorator(
+    _DATA_QUALITY_CHECKER_REGISTRY, "register_data_quality_checker"
+)
+
+# 视频文件Meta信息检查器
+_VIDEO_META_CHECKER_REGISTRY = create_checker_registry()
+register_video_meta_checker = make_register_decorator(
+    _VIDEO_META_CHECKER_REGISTRY, "register_video_meta_checker"
+)
+
+# 视频质量检查器
+_VIDEO_QUALITY_CHECKER_REGISTRY = create_checker_registry()
+register_video_quality_checker = make_register_decorator(
+    _VIDEO_QUALITY_CHECKER_REGISTRY, "register_video_quality_checker"
 )
 
 
 # ====== 辅助查询函数 ======
-def get_format_checkers(lerobot_format_version: str = "v21") -> dict[str, Callable]:
-    return dict(_FORMAT_CHECKER_REGISTRY.get(lerobot_format_version, {}))
+def get_repo_meta_checkers(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str, Callable]:
+    return dict(_REPO_FORMAT_CHECKER_REGISTRY.get(lerobot_format_version, {}))
 
 
-def get_format_checker_names(lerobot_format_version: str = "v21") -> dict[str]:
-    return list(_FORMAT_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
+def get_repo_meta_checker_names(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return list(_REPO_FORMAT_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
 
 
 def get_abnormal_episode_length_checkers(
-    lerobot_format_version: str = "v21",
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
 ) -> dict[str]:
     return list(
         _ABNORMAL_EPISODE_LENGTH_CHECKER_REGISTRY.get(lerobot_format_version, {})
@@ -92,24 +113,56 @@ def get_abnormal_episode_length_checkers(
 
 
 def get_abnormal_episode_length_checker_names(
-    lerobot_format_version: str = "v21",
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
 ) -> dict[str]:
     return list(
         _ABNORMAL_EPISODE_LENGTH_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys()
     )
 
 
-def get_data_checkers(lerobot_format_version: str = "v21") -> dict[str]:
-    return dict(_DATA_CHECKER_REGISTRY.get(lerobot_format_version, {}))
+def get_data_meta_checkers(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return dict(_DATA_META_CHECKER_REGISTRY.get(lerobot_format_version, {}))
 
 
-def get_data_checker_names(lerobot_format_version: str = "v21") -> dict[str]:
-    return list(_DATA_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
+def get_data_meta_checker_names(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return list(_DATA_META_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
 
 
-def get_video_checkers(lerobot_format_version: str = "v21") -> dict[str]:
-    return dict(_VIDEO_CHECKER_REGISTRY.get(lerobot_format_version, {}))
+def get_data_quality_checkers(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return dict(_DATA_QUALITY_CHECKER_REGISTRY.get(lerobot_format_version, {}))
 
 
-def get_video_checker_names(lerobot_format_version: str = "v21") -> dict[str]:
-    return list(_VIDEO_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
+def get_data_quality_checker_names(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return list(_DATA_QUALITY_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
+
+
+def get_video_meta_checkers(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return dict(_VIDEO_META_CHECKER_REGISTRY.get(lerobot_format_version, {}))
+
+
+def get_video_meta_checker_names(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return list(_VIDEO_META_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())
+
+
+def get_video_quality_checkers(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return dict(_VIDEO_QUALITY_CHECKER_REGISTRY.get(lerobot_format_version, {}))
+
+
+def get_video_quality_checker_names(
+    lerobot_format_version: str = LEROBOT_VERSION_V21,
+) -> dict[str]:
+    return list(_VIDEO_QUALITY_CHECKER_REGISTRY.get(lerobot_format_version, {}).keys())

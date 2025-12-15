@@ -12,3 +12,6 @@ TASKS = "tasks"
 TASK_NAME = "task_name"
 DEPENDS_ON = "depends_on"
 INPUT_FROM = "input_from"
+
+LEROBOT_VERSION_V21 = "v21"
+LEROBOT_VERSION_V30 = "v30"
