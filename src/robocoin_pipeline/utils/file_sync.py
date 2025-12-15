@@ -592,19 +592,67 @@ def push_files(
             logger.info(f"上传文件: {relative_path}")
             shutil.copy2(file_path, file_nas)
 
-    # # 上传 file_tar.json
-    # tar_json_local = dataset_local / TAR_FILE_NAME
-    # tar_json_nas = dataset_nas / TAR_FILE_NAME
-    # shutil.copy2(tar_json_local, tar_json_nas)
+    # 上传 dataset 根目录下的文件（不在任何 field 文件夹下的文件）
+    logger.info(f"开始上传根目录文件: {dataset_name}")
+    root_files_uploaded = 0
+    for file_path in dataset_local.iterdir():
+        # 只处理文件，不处理文件夹
+        if file_path.is_file():
+            file_nas = dataset_nas / file_path.name
+            logger.info(f"  上传根目录文件: {file_path.name}")
+            shutil.copy2(file_path, file_nas)
+            root_files_uploaded += 1
 
-    # # 上传 file_hash.json
-    # for field in field_list:
-    #     hash_local = dataset_local / field / HASH_FILE_NAME
-    #     hash_nas = dataset_nas / field / HASH_FILE_NAME
-    #     if hash_local.exists():
-    #         shutil.copy2(hash_local, hash_nas)
+    if root_files_uploaded > 0:
+        logger.info(f"上传了 {root_files_uploaded} 个根目录文件")
 
-    # 上传
+    # 清理 NAS 上多余的文件（不在 file_hash.json 中的文件）
+    logger.info(f"开始清理 NAS 上的多余文件: {dataset_name}")
+    for field in field_list:
+        field_local = dataset_local / field
+        field_nas = dataset_nas / field
+
+        if not field_nas.exists():
+            continue
+
+        # 加载 file_hash.json
+        hash_local = field_local / HASH_FILE_NAME
+        if not hash_local.exists():
+            logger.warning(f"本地 file_hash.json 不存在: {hash_local}")
+            continue
+
+        hash_mapping = load_json_file(hash_local)
+        # file_hash.json 的 key 包含 field 前缀，需要去掉前缀得到相对路径
+        valid_files = set()
+        for file_path in hash_mapping:
+            if file_path.startswith(field + "/"):
+                rel_path = file_path[len(field) + 1 :]
+                valid_files.add(rel_path)
+
+        # 遍历 NAS 上的所有文件
+        files_deleted = 0
+        for file_path in field_nas.rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            # 跳过元数据文件
+            if file_path.name in [
+                HARDLINK_MAPPING_NAME,
+                TAR_FILE_NAME,
+                HASH_FILE_NAME,
+            ]:
+                continue
+
+            file_rel_path = str(file_path.relative_to(field_nas))
+
+            # 如果文件不在 file_hash.json 中，删除
+            if file_rel_path not in valid_files:
+                logger.info(f"  删除多余文件: {field}/{file_rel_path}")
+                file_path.unlink()
+                files_deleted += 1
+
+        if files_deleted > 0:
+            logger.info(f"  字段 {field} 删除了 {files_deleted} 个多余文件")
 
     # 更新时间戳
     update_timestamp(dataset_local)
@@ -639,7 +687,21 @@ def pull_files(
     data_episode_set = set(data_episode_list)
     video_episode_set = set(video_episode_list)
 
-    # 1. 收集所有需要拉取的字段（包括依赖字段）
+    # 1. 拉取 dataset 根目录下的文件（不在任何 field 文件夹下的文件）
+    logger.info(f"开始拉取根目录文件: {dataset_name}")
+    root_files_pulled = 0
+    for file_path in dataset_nas.iterdir():
+        # 只处理文件，不处理文件夹
+        if file_path.is_file():
+            file_local = dataset_local / file_path.name
+            logger.info(f"  拉取根目录文件: {file_path.name}")
+            shutil.copy2(file_path, file_local)
+            root_files_pulled += 1
+
+    if root_files_pulled > 0:
+        logger.info(f"拉取了 {root_files_pulled} 个根目录文件")
+
+    # 2. 收集所有需要拉取的字段（包括依赖字段）
     all_fields_to_pull = _collect_dependent_fields(
         dataset_nas, field_list, data_episode_set, video_episode_set
     )
@@ -656,7 +718,7 @@ def pull_files(
     # 格式: {field: set(file_paths)}
     field_existing_files = {}
 
-    # 预先扫描所有字段，收集已存在的文件
+    # 3. 预先扫描所有字段，收集已存在的文件
     for field_to_scan in all_fields_to_pull:
         field_local_scan = dataset_local / field_to_scan
         if field_local_scan.exists():
@@ -679,7 +741,7 @@ def pull_files(
                     f"  字段 {field_to_scan} 已有 {len(existing_files)} 个文件，将保护不删除"
                 )
 
-    # 2. 拉取所有字段的文件
+    # 4. 拉取所有字段的文件
     for field in all_fields_to_pull:
         logger.info(f"处理字段: {field}")
 
@@ -942,7 +1004,7 @@ def pull_files(
         if hash_local_backup.exists():
             hash_local_backup.unlink()
 
-    # 3. 统一重建所有硬链接
+    # 5. 统一重建所有硬链接
     logger.info("开始重建硬链接...")
     total_hardlinks_created = 0
 
