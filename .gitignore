@@ -58,4 +58,4 @@ dask-scheduler-state.json
 config.toml
 *.log
 
-sync_files/*
+sync_files
