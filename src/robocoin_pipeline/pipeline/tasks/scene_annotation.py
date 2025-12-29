@@ -7,7 +7,7 @@ from robocoin_pipeline.pipeline.tasks.task_registry import (
 )
 
 
-@register_single_input_field_task
+@register_single_input_field_task()
 def scene_annotation(
     repo_path: str | Path,
     input_field: str,
