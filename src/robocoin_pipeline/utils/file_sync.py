@@ -1104,6 +1104,53 @@ def pull_files(
             f"({total_tar_size / 1024**2:.2f} MB)"
         )
 
+        # 4.5 拉取 loose files (不以 tar 包形式存在的文件，如 meta)
+        loose_files_pulled = 0
+        candidate_files = []
+        if not is_primary_field:
+            if field in field_required_files:
+                candidate_files = list(field_required_files[field])
+        else:
+            candidate_files = list(remote_hashes.keys())
+
+        for rel_path in candidate_files:
+            file_path_with_field = field + "/" + rel_path
+
+            # 1. 跳过在 tar 包中的文件
+            if file_path_with_field in tar_mapping:
+                continue
+
+            # 2. 跳过 hardlink 的 link 文件
+            if rel_path in hardlinked_links:
+                continue
+
+            # 3. 检查 episode 过滤 (仅对 primary field)
+            if is_primary_field:
+                episode_idx = _extract_episode_idx(rel_path)
+                is_video = "videos/" in rel_path or "/videos/" in rel_path
+                episode_set = video_episode_set if is_video else data_episode_set
+
+                if episode_idx is not None and episode_idx not in episode_set:
+                    continue
+
+            # 记录为需要的文件
+            needed_files.add(rel_path)
+
+            # 4. 检查是否需要更新
+            file_local_path = field_local / rel_path
+            remote_hash = remote_hashes.get(rel_path)
+            local_hash = local_hashes.get(rel_path)
+
+            if not file_local_path.exists() or local_hash != remote_hash:
+                file_nas_path = field_nas / rel_path
+                if file_nas_path.exists():
+                    file_local_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(file_nas_path, file_local_path)
+                    loose_files_pulled += 1
+
+        if loose_files_pulled > 0:
+            logger.info(f"  拉取了 {loose_files_pulled} 个 loose files")
+
         # 5. 下载并解压 tar 包
         for tar_name in required_tars:
             tar_nas_path = field_nas / tar_name
@@ -1125,9 +1172,10 @@ def pull_files(
             except Exception as e:
                 logger.error(f"  解压失败 {tar_name}: {e}")
                 raise FileSyncError(f"解压失败: {e}") from e
-
-            # 删除 tar 包
-            tar_local_path.unlink()
+            finally:
+                # 删除 tar 包
+                if tar_local_path.exists():
+                    tar_local_path.unlink()
 
         # 6. 删除不需要的文件
         # 对所有字段（主字段和依赖字段）都保护已存在的文件，实现增量更新
@@ -1538,8 +1586,8 @@ def _pull_hardlink_dependencies(
 if __name__ == "__main__":
     # # 测试内存管理功能
     # # 设置环境变量：启用自动清理，存储总限制为 1.2GB（可容纳约2个数据集）
-    # os.environ["ROBOCOIN_AUTO_CLEANUP"] = "1"
-    # os.environ["ROBOCOIN_STORAGE_LIMIT"] = str(int(1.2 * 1024**3))  # 1.2GB
+    os.environ["ROBOCOIN_AUTO_CLEANUP"] = "1"
+    os.environ["ROBOCOIN_STORAGE_LIMIT"] = str(int(1.2 * 1024**3))  # 1.2GB
 
     # logger.info("=" * 80)
     # logger.info("开始测试内存管理功能")
@@ -1552,8 +1600,8 @@ if __name__ == "__main__":
     # # 2. 再拉取 RMC-AIDA-L_box_up_down2（会触发内存管理）
     # # 3. 再拉取 RMC-AIDA-L_box_up_down3（会触发内存管理，删除最老的数据集）
 
-    # nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
-    # local_path = Path("sync_files/test_memory")
+    nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
+    local_path = Path("sync_files/test_memory")
 
     # # 清空测试目录
     # if local_path.exists():
@@ -1564,14 +1612,23 @@ if __name__ == "__main__":
     # logger.info("\n" + "=" * 80)
     # logger.info("第 1 步：拉取 RMC-AIDA-L_box_up_down1（所有 episode）")
     # logger.info("=" * 80)
-    # pull_files(
-    #     nas_path=nas_path,
-    #     local_path=local_path,
-    #     dataset_name="RMC-AIDA-L_box_up_down1",
-    #     field_list=["merged"],
-    #     data_episode_list=list(range(200)),
-    #     video_episode_list=list(range(200)),
-    # )
+    pull_files(
+        nas_path=nas_path,
+        local_path=local_path,
+        dataset_name="RMC-AIDA-L_box_up_down1",
+        field_list=["merged", "format_convert", "motion_annotation"],
+        data_episode_list=[1, 3, 4],
+        video_episode_list=[2, 6, 8],
+    )
+
+    pull_files(
+        nas_path=nas_path,
+        local_path=local_path,
+        dataset_name="RMC-AIDA-L_box_up_down1",
+        field_list=["merged", "format_convert", "motion_annotation"],
+        data_episode_list=[11, 13, 14],
+        video_episode_list=[12, 16, 18],
+    )
 
     # # 查看当前磁盘使用情况
     # logger.info("\n当前数据集:")
@@ -1631,16 +1688,16 @@ if __name__ == "__main__":
     # logger.info("=" * 80)
 
     # 测试push
-    logger.info("\n" + "=" * 80)
-    logger.info("测试 push_files 功能")
-    logger.info("=" * 80)
-    local_path = Path("sync_files")
-    nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
-    push_files(
-        nas_path=nas_path,
-        local_path=local_path,
-        dataset_name="RMC-AIDA-L_box_up_down1",
-        field_list=["format_convert", "merged", "motion_annotation"],
-        data_episode_list=list(range(200)),
-        video_episode_list=list(range(200)),
-    )
+    # logger.info("\n" + "=" * 80)
+    # logger.info("测试 push_files 功能")
+    # logger.info("=" * 80)
+    # local_path = Path("sync_files")
+    # nas_path = Path("/mnt/nas/synnas/docker2/robocoin-pipeline/robocoin-datasets")
+    # push_files(
+    #     nas_path=nas_path,
+    #     local_path=local_path,
+    #     dataset_name="RMC-AIDA-L_box_up_down1",
+    #     field_list=["format_convert", "merged", "motion_annotation"],
+    #     data_episode_list=list(range(200)),
+    #     video_episode_list=list(range(200)),
+    # )
