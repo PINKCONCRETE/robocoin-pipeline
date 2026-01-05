@@ -79,3 +79,14 @@ processor = MyProcessor(repo_path="/path/to/repo", config=config)
 # 执行处理
 processor.process()
 ```
+应该是要生成标注信息和统计信息
+meta/episodes.jsonl
+meta/episodes_stats.jsonl
+
+应该是hardlink的：
+meta/tasks.jsonl
+meta/info.json
+video/episode_[idx].mp4
+data/episode_[idx].parquet
+
+如果不生成，默认建立hardlink，从输入的feature，找到实体文件建立hardlink，若有多个实体文件出现冲突则直接报错。

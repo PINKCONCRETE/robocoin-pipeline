@@ -11,13 +11,23 @@ from dacite import from_dict
 from pandas import DataFrame as pd
 from tqdm import tqdm
 
+from robocoin_pipeline.constants.path_constant import (
+    HARDLINK_MAPPINGS_JSON_FILE,
+    META_EPISODES_JSONL_FILE,
+    META_INFO_JSON_FILE,
+    META_TASKS_JSONL_FILE,
+)
 from robocoin_pipeline.utils.dataset_info import (
+    get_chunk_size,
     get_dataset_basic_infos,
+    get_video_features,
 )
 from robocoin_pipeline.utils.paths import (
     get_data_files,
     get_episodes_stats_jsonl_file,
     get_meta_info_file,
+    get_relative_data_file,
+    get_relative_video_file,
 )
 
 
@@ -98,6 +108,8 @@ class DataProcessorBase:
             self.repo_path, self.output_field
         )
 
+        self.hardlink_mappings: dict[str, str] = {}
+
         self._ep_idx: int | None = None
 
         # self._validate_inputs()
@@ -105,10 +117,10 @@ class DataProcessorBase:
     # def _validate_inputs(self) -> None:
     #     if not self.input_field_features:
     #         raise ValueError("input_field_features is empty")
-
+    #
     #     if not self.output_features:
     #         raise ValueError("output_features is empty")
-
+    #
     #     input_fields = self.input_field_features.keys()
     #     ep_num = get_total_episodes(self.repo_path, input_fields[0])
     #     for field in input_fields[1:]:
@@ -250,11 +262,20 @@ class DataProcessorBase:
     def process(self) -> None:
         self.prepare_processing()
         self.episodes_stats = []
+
+        self.process_episodes_jsonl()
+        self.process_tasks_jsonl()
+        self.process_info_json()
+
         for episode_idx in tqdm(
             range(len(self.output_field_data_files)),
             desc="Processing episodes",
             unit="episode",
         ):
+            self.process_video(episode_idx)
+            if self.process_data_file(episode_idx):
+                continue
+
             ori_data = self.get_input_fields_episode_data(episode_idx)
             self._ep_idx = episode_idx
             output_datas: dict[str, np.ndarray] = self.process_data(ori_data)
@@ -266,8 +287,9 @@ class DataProcessorBase:
 
             self.write_output_field_episode_data(output_datas, episode_idx)
             self.episodes_stats.append(self._compute_episode_stat(output_datas))
-        self._write_output_field_episodes_stats_file()
-        self.write_output_field_info_file()
+
+        self.process_episodes_stats_jsonl()
+        self._save_hardlink_mappings()
         self._ep_idx = None
 
     def _compute_episode_stat(
@@ -292,3 +314,142 @@ class DataProcessorBase:
             for stat in self.episodes_stats:
                 json.dump(stat, f)
                 f.write("\n")
+
+    def _find_entity_file(self, relative_path: str) -> Path | None:
+        """
+        在 input_fields 中查找实体文件。
+        如果找到多个，抛出异常。
+        """
+        found = []
+        for field in self.input_fields:
+            # 构建完整路径: repo_path / field / relative_path
+            path = self.repo_path / field / relative_path
+            if path.exists():
+                found.append(path)
+
+        if len(found) > 1:
+            raise ValueError(
+                f"Conflict: Multiple entity files found for '{relative_path}' in fields: {[f.parent.name for f in found]}"
+            )
+
+        return found[0] if found else None
+
+    def _add_hardlink(self, target_rel: str, source_abs: Path) -> None:
+        """
+        添加 hardlink 映射。
+        key: output_field/target_rel
+        value: source_abs (relative to repo_path)
+        """
+        key = f"{self.output_field}/{target_rel}"
+        value = str(source_abs.relative_to(self.repo_path))
+        self.hardlink_mappings[key] = value
+
+    def process_episodes_jsonl(self) -> None:
+        # 默认尝试建立 hardlink，除非被子类重写以生成文件
+        target_rel = META_EPISODES_JSONL_FILE
+        source = self._find_entity_file(target_rel)
+        if source:
+            self._add_hardlink(target_rel, source)
+
+    def process_tasks_jsonl(self) -> None:
+        # 应该是 hardlink
+        target_rel = META_TASKS_JSONL_FILE
+        source = self._find_entity_file(target_rel)
+        if source:
+            self._add_hardlink(target_rel, source)
+
+    def process_info_json(self) -> None:
+        # 应该是 hardlink
+        target_rel = META_INFO_JSON_FILE
+        source = self._find_entity_file(target_rel)
+        if source:
+            self._add_hardlink(target_rel, source)
+        else:
+            # 如果没找到，尝试生成
+            # 注意：如果 hardlink 成功，就不生成了
+            # 但这里我们只是记录 mapping，实际生成在 _save_hardlink_mappings 之后吗？
+            # 不，mapping 只是记录。如果 mapping 存在，后续 sync 会处理。
+            # 如果没 mapping，我们应该在这里生成 info.json 吗？
+            # process() 中调用 process_info_json() 是为了处理 info.json。
+            # 如果没找到源文件，调用 write_output_field_info_file 生成
+            self.write_output_field_info_file()
+
+    def process_video(self, episode_idx: int) -> None:
+        # 应该是 hardlink
+        # 获取 output field 需要的 video keys
+        # 注意：这里假设 info.json 已经就绪（无论是 hardlink 还是 generated）
+        # 如果是 hardlink，info.json 可能还没 physically 存在于 output field (只在 mapping 中)
+        # 所以 get_video_features(output_field) 可能失败
+        # 因此，我们需要从 input fields 中推断，或者从 hardlink mapping 中找到 info.json 的源头读取
+
+        # 简便起见，我们遍历所有 input fields，找到匹配 episode 的 video
+
+        for field in self.input_fields:
+            try:
+                # 获取该 field 的 chunk_size
+                chunk_size = get_chunk_size(self.repo_path, field)
+                video_keys = get_video_features(self.repo_path, field)
+            except Exception:
+                continue
+
+            if not video_keys:
+                continue
+
+            for key in video_keys:
+                rel_path = get_relative_video_file(episode_idx, key, chunk_size)
+                source_path = self.repo_path / field / "videos" / rel_path
+
+                if source_path.exists():
+                    target_rel = f"videos/{rel_path}"
+                    # 检查冲突
+                    full_target_key = f"{self.output_field}/{target_rel}"
+                    if full_target_key in self.hardlink_mappings:
+                        existing = self.hardlink_mappings[full_target_key]
+                        if existing != str(source_path.relative_to(self.repo_path)):
+                            raise ValueError(f"Conflict for video {target_rel}")
+
+                    self._add_hardlink(target_rel, source_path)
+
+    def process_data_file(self, episode_idx: int) -> bool:
+        # 应该是 hardlink
+        # 查找是否存在对应的 data file
+        found_sources: list[tuple[str, Path]] = []
+
+        for field in self.input_fields:
+            try:
+                chunk_size = get_chunk_size(self.repo_path, field)
+            except Exception:
+                continue
+
+            rel_path = get_relative_data_file(episode_idx, chunk_size)
+            source_path = self.repo_path / field / rel_path
+
+            if source_path.exists():
+                found_sources.append((rel_path, source_path))
+
+        if len(found_sources) > 1:
+            raise ValueError(
+                f"Conflict: Multiple data files found for episode {episode_idx} in fields: {[s[1].parent.parent.name for s in found_sources]}"
+            )
+
+        if found_sources:
+            # 找到了，建立 hardlink
+            rel_path, source_path = found_sources[0]
+            self._add_hardlink(rel_path, source_path)
+            return True
+
+        return False
+
+    def process_episodes_stats_jsonl(self) -> None:
+        # 生成统计信息
+        self._write_output_field_episodes_stats_file()
+
+    def _save_hardlink_mappings(self) -> None:
+        if not self.hardlink_mappings:
+            return
+
+        output_file = self.repo_path / self.output_field / HARDLINK_MAPPINGS_JSON_FILE
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_file, "w") as f:
+            json.dump(self.hardlink_mappings, f, indent=2)
