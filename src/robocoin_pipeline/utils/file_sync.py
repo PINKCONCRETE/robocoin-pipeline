@@ -1617,17 +1617,8 @@ if __name__ == "__main__":
         local_path=local_path,
         dataset_name="RMC-AIDA-L_box_up_down1",
         field_list=["merged", "format_convert", "motion_annotation"],
-        data_episode_list=[1, 3, 4],
-        video_episode_list=[2, 6, 8],
-    )
-
-    pull_files(
-        nas_path=nas_path,
-        local_path=local_path,
-        dataset_name="RMC-AIDA-L_box_up_down1",
-        field_list=["merged", "format_convert", "motion_annotation"],
-        data_episode_list=[11, 13, 14],
-        video_episode_list=[12, 16, 18],
+        data_episode_list=list[int](range(200)),
+        video_episode_list=list[int](range(200)),
     )
 
     # # 查看当前磁盘使用情况

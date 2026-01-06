@@ -112,7 +112,7 @@ def get_total_episodes(repo_path: str | Path, field: str = DEFAULT_FIELD) -> int
 
 def get_chunk_size(repo_path: str | Path, field: str = DEFAULT_FIELD) -> int:
     meta_info = get_dataset_info(repo_path, field)
-    return meta_info["chunk_size"]
+    return meta_info["chunks_size"]
 
 
 def get_total_frames(repo_path: str | Path, field: str = DEFAULT_FIELD) -> int:
@@ -172,9 +172,9 @@ def get_episode_timestamp_to(
 def get_video_features(repo_path: str | Path, field: str = DEFAULT_FIELD) -> set[str]:
     info_json_obj = get_dataset_info(repo_path, field)
     results = set()
-    for field in info_json_obj["features"]:
-        if field["dtype"] == "video":
-            results.update(field.key())
+    for feature_name, feature_info in info_json_obj["features"].items():
+        if feature_info["dtype"] == "video":
+            results.add(feature_name)
 
     return results
 
